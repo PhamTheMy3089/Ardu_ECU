@@ -1,162 +1,90 @@
-# 🚀 PROJECT_CURRENT - Current Active Project
+# PROJECT_CURRENT — Dự Án ECU Đang Phát Triển
 
-**Status**: Active Development  
-**Last Updated**: 2026-07-16  
-**Files**: 3 main files
-
----
-
-## 📂 Contents
-
-### 1. **ECU_TestV1_EGT_DRY_START_PATCH.ino**
-```
-File Size: 84.5 KB
-Lines: ~1,900
-Type: Arduino/ESP32 Firmware (Main)
-```
-
-**Features**:
-- EGT-open dry-start mode (safety feature)
-- ACCEL_TO_IDLE timeout (prevents fuel runaway)
-- Real cooldown airflow management
-- RPM noise diagnostics and guard
-- Hybrid fuel control with calibration table
-- Web UI with ESP32 SoftAP (ECU_TestV1 / admin1234)
-- CSV telemetry SD logging
-- Enhanced button logic (2-step ARM→START)
-
-**Pin Configuration**:
-- MAX31855 (EGT): CLK=18, CS=5, DO=19
-- RPM Sensor: GPIO 33
-- ESC Pump: GPIO 26
-- ESC Starter: GPIO 25
-- Valve 1: GPIO 17
-- Valve 2: GPIO 16
-- Ignition/Glow: GPIO 32
-- User Button: GPIO 22 (active-low)
-- Status LED: GPIO 2 (onboard)
-- SD Card: CS=13, SCK=14, MOSI=23, MISO=27
-
-**Web Interface**:
-- URL: http://192.168.4.1
-- SSID: ECU_TestV1
-- Password: admin1234
-- Features: Dashboard, Controls, Test Wizard, Event Log
+**Trạng thái**: Đang phát triển tích cực  
+**Cập nhật**: 2026-07-16
 
 ---
 
-### 2. **RPM_Sensor_20260709.net**
+## Cấu Trúc Thư Mục
+
 ```
-File Size: 5.5 KB
-Type: PADS PCB Netlist Format
-Purpose: RPM Sensor Circuit Reference
-```
-
-**Contains**:
-- RPM sensor schematic definition
-- Component connections
-- PCB layout reference
-
----
-
-### 3. **SCH_MinijetengineECU_20260709.json**
-```
-File Size: 139 KB
-Type: JSON Schema
-Purpose: ECU Design Reference
-```
-
-**Contains**:
-- Complete ECU schematic in JSON format
-- Component definitions
-- Pinout specifications
-- Circuit connections
-- Design parameters
-
----
-
-## 🔧 How to Use
-
-### Uploading Firmware
-1. Open `ECU_TestV1_EGT_DRY_START_PATCH.ino` in Arduino IDE
-2. Select Board: **ESP32 DevKit V1** (or NodeMCU-32S)
-3. Install required libraries:
-   - SPI
-   - SD
-   - ESP32Servo
-   - Adafruit_MAX31855
-   - WiFi
-   - WebServer
-
-4. Upload to ESP32
-
-### Accessing Web UI
-1. Power on ESP32
-2. Connect to WiFi: **ECU_TestV1**
-3. Password: **admin1234**
-4. Open browser: **http://192.168.4.1**
-
-### Using Reference Schemas
-- **RPM_Sensor_20260709.net**: Import into PADS PCB or reference for circuit design
-- **SCH_MinijetengineECU_20260709.json**: Open with JSON viewer for schematic reference
-
----
-
-## 📋 Key Parameters
-
-### Safety Limits
-```
-MAX_RPM: Configurable via Web UI
-MAX_TEMP_C: Configurable via Web UI
-ACCEL_TO_IDLE_TIMEOUT: 20s (default)
-```
-
-### Control Ranges
-```
-ESC: 1000-2000 microseconds
-Pump: Configurable (1000-1270 us typical)
-Valves: ON/OFF (GPIO control)
-Ignition: ON/OFF (GPIO control)
-```
-
-### Sensor Sampling
-```
-EGT: ~8 Hz (120ms period)
-RPM: 10 Hz (100ms period)
-SD Logging: 2 lines/sec (500ms period)
+PROJECT_CURRENT/
+│
+├── Firmware/                          ← Code ESP32 (upload bằng Arduino IDE)
+│   └── ECU_TestV1_EGT_DRY_START_PATCH/
+│       └── ECU_TestV1_EGT_DRY_START_PATCH.ino   ← Firmware chính
+│
+├── Hardware/                          ← Thiết kế mạch
+│   ├── RPM_Sensor_20260709.net        ← Netlist cảm biến RPM (PADS PCB)
+│   └── SCH_MinijetengineECU_20260709.json ← Sơ đồ mạch ECU (JSON)
+│
+├── Docs/                              ← Tài liệu kỹ thuật
+│   ├── CODE_ARCHITECTURE.md           ← Kiến trúc firmware (state machine, ISR...)
+│   ├── CODE_REVIEW_FINDINGS.md        ← Kết quả review code (8 lỗi đã fix)
+│   ├── UPLOAD_AND_TEST_GUIDE.md       ← Hướng dẫn upload và test qua Serial/Web
+│   ├── PRE_ENGINE_TEST_GUIDE.md       ← Quy trình test trước khi chạy động cơ
+│   └── DSO152_RPM_CALIBRATION_GUIDE.md ← Hiệu chỉnh KMZ10A bằng oscilloscope
+│
+└── README.md                          ← File này
 ```
 
 ---
 
-## ⚠️ Important Warnings
+## Bắt Đầu Nhanh
 
-- **High Temperature Hazard**: Keep components away from engine exhaust
-- **ESP32 Voltage**: 3.3V only - Use logic level converter for 5V devices
-- **K-Type Thermocouple Only**: Do not use other types
-- **Power Supply**: Use proper PSU rated for your application
-- **Mechanical Safety**: Jet engine produces high thrust - secure all equipment
+### Upload Firmware
+1. Mở `Firmware/ECU_TestV1_EGT_DRY_START_PATCH/ECU_TestV1_EGT_DRY_START_PATCH.ino`  
+   bằng **Arduino IDE**
+2. Board: **ESP32 Dev Module** (hoặc NodeMCU-32S)
+3. Thư viện cần: `ESP32Servo`, `Adafruit_MAX31855`, `WiFi`, `WebServer`, `SD`
+4. Upload → Mở Serial Monitor 115200 baud
 
----
-
-## 🚀 Next Steps
-
-1. **Upload Firmware** to ESP32
-2. **Access Web UI** and configure parameters
-3. **Reference Schemas** for hardware integration
-4. **Test on Actual Engine** following safety procedures
+### Truy Cập Web UI
+- WiFi SSID: **ECU_TestV1**
+- Password: **admin1234**
+- URL: **http://192.168.4.1**
 
 ---
 
-## 📞 Support
+## Pinout Chính
 
-For technical questions or issues:
-1. Check the Web UI dashboard for status
-2. Review error codes in event log
-3. Consult REFERENCES folder for design documentation
-4. Refer to PROJECT_REVIEW.md for architecture overview
+| Chức năng | GPIO |
+|-----------|------|
+| MAX31855 CLK | 18 |
+| MAX31855 CS | 5 |
+| MAX31855 DO | 19 |
+| RPM Sensor | **33** |
+| Pump ESC | 26 |
+| Starter ESC | 25 |
+| Valve 1 | 17 |
+| Valve 2 | 16 |
+| Ignition/Glow | 32 |
+| User Button | 22 |
+| Status LED | 2 |
+| SD CS/SCK/MOSI/MISO | 13/14/23/27 |
 
 ---
 
-**Project Status**: 🟢 Active Development  
-**Stability**: 🟠 Test Version (Use with caution)  
-**Last Updated**: 2026-07-16
+## Tài Liệu Đọc Theo Thứ Tự
+
+| # | File | Khi nào đọc |
+|---|------|------------|
+| 1 | `Docs/UPLOAD_AND_TEST_GUIDE.md` | Lần đầu upload ESP32 |
+| 2 | `Docs/DSO152_RPM_CALIBRATION_GUIDE.md` | Hiệu chỉnh cảm biến RPM |
+| 3 | `Docs/PRE_ENGINE_TEST_GUIDE.md` | Trước khi test động cơ thật |
+| 4 | `Docs/CODE_ARCHITECTURE.md` | Khi cần hiểu sâu firmware |
+| 5 | `Docs/CODE_REVIEW_FINDINGS.md` | Tham khảo các lỗi đã biết/đã fix |
+
+---
+
+## Cảnh Báo An Toàn
+
+- ESP32 chỉ chịu **3.3V** — dùng level converter cho tín hiệu 5V
+- Chỉ dùng **thermocouple loại K**
+- Cảm biến RPM KMZ10A cần hiệu chỉnh trimpot **RP1/RP2/RP3** trước khi dùng
+- Đọc `PRE_ENGINE_TEST_GUIDE.md` trước khi test có nhiên liệu
+
+---
+
+**Trạng thái**: 🟢 Đang phát triển tích cực  
+**Độ ổn định**: 🟠 Phiên bản test (dùng cẩn thận)
