@@ -13,6 +13,7 @@ REFERENCES/
 ├── Documentation/          ← Hướng dẫn và tài liệu tham khảo
 │   ├── Engine_Manual_NewerModel.pdf         ← EnJet G3 Series manual (English, có bảng thông số E86)
 │   ├── Engine_Manual_NewerModel_Chinese.pdf ← EnJet G3 系列使用手册 (tiếng Trung, bản gốc)
+│   ├── Engine_Manual_E80_E100.pdf           ← EnJet E80/E100 manual (model khác, cùng hãng, đối chiếu thêm)
 │   └── Manuals/
 │       ├── Rev 9-10 ECU_Manual.md
 │       └── ECU Rev11 Guide.pdf
@@ -148,6 +149,16 @@ Web UI               |  ✗   |  ⚠️   |  ✓    |  ✓    |  ✓
   Chinese text (ENJET G3 系列使用手册 V1.2). Cross-checked against the
   English version for the valve/component-test terminology (启动阀 = Start
   valve, 主油阀 = Main oil valve).
+- **Engine_Manual_E80_E100.pdf** → EnJet manual for the E80/E100 models —
+  a *different* engine size from the user's E86, and branded by a
+  different listed manufacturer (ENJET AVIATION TECHNOLOGY / ZHONGDONG
+  AVIATION, vs. Guangxi Nanning Enjetpower for the G3/E86 manual). Confirms
+  the same "start valve + fuel valve" (no gas) architecture and PCU
+  component-test pattern independently of the G3 manual. Spec table:
+  E80 = 4N idle / 80N max thrust, 340 ml/min max fuel; E100 = 4N idle /
+  100N max thrust, 380 ml/min max fuel. Useful for cross-checking the
+  valve architecture, not for E86-specific tuning numbers (RPM/EGT/fuel
+  limits differ per engine size).
 
 **Note**: These are old and may not reflect current implementation.
 
