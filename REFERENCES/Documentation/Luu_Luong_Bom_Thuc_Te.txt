@@ -1,0 +1,14 @@
+ESC=1160us = 50ml/ phút 
+
+ESC=1175us = 80ml/ phút 
+
+ESC=1250us = 265ml/ phút
+
+ESC=1260us = 280ml/ phút
+
+ESC=1265us = 360ml/ phút
+
+ESC=1270us = 560ml/ phút
+
+ESC=1300 = 600ml/ phút
+
