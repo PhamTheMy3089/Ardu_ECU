@@ -22,7 +22,6 @@ REFERENCES/
 │   ├── Rev10/             ← Phiên bản cũ (lưu trữ)
 │   ├── Rev11/             ← Phiên bản ổn định (tham khảo)
 │   ├── Rev12_TC10/        ← Phiên bản test (tham khảo)
-│   ├── TestV1_EGT_DRY_START/  ← Phiên bản phát triển cũ
 │   └── README.md          ← So sánh phiên bản
 │
 └── Hardware/              ← Thiết kế phần cứng tham khảo
@@ -51,7 +50,6 @@ REFERENCES/
 | **Rev 10** | 📦 Archived | Legacy reference | .zip |
 | **Rev 11** | 📚 Reference | Stable design example | .ino + .h |
 | **Rev 12 TC10** | 📚 Reference | Multi-sensor design | .ino + .h |
-| **TestV1_EGT_DRY_START** | 📚 Reference | Older dev version | .ino |
 
 **Note**: These are for reference only. Use the current project files in `/PROJECT_CURRENT/` for actual implementation.
 
@@ -106,7 +104,7 @@ REFERENCES/
 | You want to... | Go to... |
 |---|---|
 | Current project files | `/PROJECT_CURRENT/` |
-| Latest firmware | `/PROJECT_CURRENT/ECU_TestV1_EGT_DRY_START_PATCH.ino` |
+| Latest firmware | `/PROJECT_CURRENT/Firmware/ECU_TestV1_EGT_DRY_START_PATCH/ECU_TestV1_EGT_DRY_START_PATCH.ino` |
 | Stable firmware example | `/REFERENCES/Firmware/Rev11/` |
 | Hardware design reference | `/REFERENCES/Hardware/Schematics/` |
 | Old manuals/docs | `/REFERENCES/Documentation/Manuals/` |
@@ -160,7 +158,7 @@ Web UI               |  ✗   |  ⚠️   |  ✓    |  ✓    |  ✓
 For understanding the project evolution:
 
 1. Start with `/PROJECT_CURRENT/README.md` (current project)
-2. Review `/PROJECT_REVIEW.md` (comprehensive analysis)
+2. Review `/PROJECT_CURRENT/Docs/CODE_ARCHITECTURE.md` and `CODE_REVIEW_FINDINGS.md` (comprehensive analysis)
 3. Explore `/REFERENCES/Firmware/Rev11/` (stable reference design)
 4. Check `/REFERENCES/Hardware/Schematics/` (design examples)
 5. Study old `/REFERENCES/Documentation/` (historical context)
