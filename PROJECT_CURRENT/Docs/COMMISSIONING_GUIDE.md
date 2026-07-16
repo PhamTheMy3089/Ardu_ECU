@@ -163,6 +163,25 @@ Nếu bất kỳ đâu bị **ABORT** (OVER_TEMP, NO_IGNITION, NO_RPM_RISE,
 RPM_SIGNAL_LOST, OVERSPEED...) — **đọc kỹ lý do trên Serial trước khi
 `clearabort`**. Không type `clearabort` theo phản xạ.
 
+### ⚠️ Xả nhiên liệu tồn dư trước khi thử start lại (sau NO_IGNITION / ACCEL_TO_IDLE_TIMEOUT)
+
+Theo manual EnJet E80/E100 (`REFERENCES/Documentation/Engine_Manual_E80_E100.pdf`):
+nếu lần start trước bị fail (đặc biệt `NO_IGNITION` — đã phun dầu nhưng
+không bắt lửa), nhiên liệu chưa cháy **vẫn còn đọng lại trong buồng đốt**.
+Cố start lại ngay có thể gây cháy lớn khi lượng dầu tồn dư này bắt lửa
+đột ngột cùng lúc với lần mồi mới.
+
+**Quy trình xả trước khi start lại**:
+1. Nghiêng động cơ, **đuôi (exhaust) hướng xuống dưới**
+2. Dùng `starttest <us> <ms>` (hoặc quay tay nếu có thể) để quay rotor vài
+   giây, không phun thêm nhiên liệu — mục đích thổi bay dầu tồn đọng ra
+   khỏi buồng đốt qua đuôi
+3. Sau đó mới `clearabort` và thử `startidle` lại
+
+Bỏ qua bước này nếu lần fail là do abort SỚM (`NO_STARTER_RPM`,
+`OVER_TEMP` trước khi có nhiên liệu) — chỉ áp dụng khi đã ở stage
+`ST_INTRO_FUEL` trở lên (đã phun dầu) mà chưa đánh lửa thành công.
+
 Khi vào `MODE_IDLING` ổn định vài chục giây, không dao động RPM bất
 thường → **giai đoạn wet-start thành công**.
 
@@ -230,6 +249,9 @@ firmware, ngắt điện trực tiếp.
   biến EGT hỏng vĩnh viễn — lệnh này bỏ qua xác nhận nhiệt độ qua sensor.
 - Sau **mọi ABORT**, đọc lý do (`lastAbortReason`) trước khi re-arm, đừng
   `clearabort` phản xạ.
+- Sau `NO_IGNITION`/abort có phun dầu nhưng chưa cháy — xả nhiên liệu tồn
+  dư (nghiêng đuôi xuống + quay rotor không tải) trước khi thử lại, xem
+  Giai đoạn 6.
 - Không gõ lệnh Serial chậm/ngắt quãng khi engine đang chạy thật.
 - Không để SD đầy 1000 file log.
 - Throttle luôn tăng/giảm từng nấc nhỏ, không set thẳng 100% từ IDLING.
@@ -239,3 +261,5 @@ firmware, ngắt điện trực tiếp.
 **Tài liệu liên quan**:
 - `DSO152_RPM_CALIBRATION_GUIDE.md` — chi tiết giai đoạn 2
 - `CODE_REVIEW_FINDINGS.md` — các lỗi đã fix, ảnh hưởng đến độ tin cậy các bước trên
+- `REFERENCES/Documentation/Engine_Manual_E80_E100.pdf` — nguồn quy trình
+  xả nhiên liệu tồn dư trong Giai đoạn 6
