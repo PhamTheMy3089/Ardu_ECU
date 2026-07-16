@@ -174,8 +174,10 @@ StartStage startStage = ST_NONE;
 uint32_t modeEnteredMs = 0, stageEnteredMs = 0, starterAboveReleaseSinceMs = 0, lastPumpStepMs = 0;
 bool cooldownAfterAbort = false;
 bool stage2Armed = false;
+bool abortAcknowledged = false;  // must be set via clearabort before re-arm from ABORTED
 uint32_t stage2ArmUntilMs = 0, manualIgnOffAtMs = 0, manualStartOffAtMs = 0;
 String lastAbortReason = "NONE";
+String serialCmdBuf = "";  // non-blocking serial command accumulator
 int throttlePct = 0;
 
 Servo escPump, escStart;
@@ -183,6 +185,7 @@ Adafruit_MAX31855 thermo(PIN_EGT_CLK, PIN_EGT_CS, PIN_EGT_DO);
 
 void IRAM_ATTR rpmISR();
 bool canStartAutoIdle(String& why);
+bool egtSafeForAbortClear();
 void beginAutoIdle();
 void printStatus(bool force);
 void handleCommand(String cmd);
@@ -462,10 +465,11 @@ void enterCooldown(bool afterAbort, const String& reason) {
 
 void abortAll(const String& reason) {
   lastAbortReason = reason;
+  abortAcknowledged = false;
   Serial.println();
   Serial.print("ABORT: ");
   Serial.print(reason);
-  Serial.println(" -> COOLDOWN");
+  Serial.println(" -> COOLDOWN (type clearabort to acknowledge before re-arm)");
   Serial.println();
   enterCooldown(true, reason);
 }
@@ -482,7 +486,16 @@ bool isStage2Armed() {
   return true;
 }
 void armStage2() { stage2Armed = true; stage2ArmUntilMs = millis() + STAGE2_ARM_TIME_MS; addLog("ARMED 10s"); Serial.println("WARNING: STAGE2 ARMED FOR 10 SECONDS"); }
-void stage2Off() { stage2Armed = false; manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0; activeTest = TEST_NONE; enterWaitingSafe(); addLog("SAFE OFF"); Serial.println("STAGE2 OFF: outputs safe."); }
+void stage2Off() {
+  if (ecuMode == MODE_ABORTED && !egtSafeForAbortClear()) {
+    Serial.print("SAFE OFF BLOCKED: EGT still hot (");
+    if (egt.ok) { Serial.print(egt.c, 1); Serial.print("C"); }
+    else { Serial.print(egtFaultString(egt.fault)); }
+    Serial.println("). Wait to cool or use physical button.");
+    return;
+  }
+  stage2Armed = false; manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0; activeTest = TEST_NONE; enterWaitingSafe(); addLog("SAFE OFF"); Serial.println("STAGE2 OFF: outputs safe.");
+}
 
 
 bool egtSafeForAbortClear() {
@@ -588,6 +601,7 @@ void handleUserButton() {
       btnActionDone = true;
       if (egtSafeForAbortClear()) {
         lastAbortReason = "CLEARED_BY_BUTTON";
+        abortAcknowledged = true;
         enterWaitingSafe();
         Serial.println("USER_BTN: ABORT cleared, ECU -> WAITING.");
       } else {
@@ -738,9 +752,8 @@ void IRAM_ATTR rpmISR() {
   isrRawEdges++;
 
   if (isrLastRawEdgeUs == 0) {
+    // First edge after reset: record timestamp only; we need at least one interval before accepting.
     isrLastRawEdgeUs = nowUs;
-    isrLastAcceptedPulseUs = nowUs;
-    isrAcceptedPulses++;
     return;
   }
 
@@ -877,8 +890,17 @@ void updateRpm() {
 void updateEgt() {
   uint32_t nowMs = millis(); if (nowMs - egt.lastReadMs < EGT_READ_PERIOD_MS) return;
   egt.lastReadMs = nowMs;
+  // Read fault bits first; readCelsius() then re-reads the chip once more (two SPI transactions
+  // is unavoidable with this library). Using readError() first ensures the fault code comes from
+  // the same chip state as the isnan() check that follows.
+  uint8_t fault = thermo.readError();
   double tc = thermo.readCelsius();
-  if (isnan(tc)) { egt.ok = false; egt.fault = thermo.readError(); return; }
+  if (isnan(tc) || fault != 0) {
+    egt.ok = false;
+    egt.fault = fault;
+    egt.gradientCps = 0;  // clear stale gradient so display shows 0 when sensor is invalid
+    return;
+  }
   if (egt.ok && !isnan(egt.c)) {
     float dtS = (float)(nowMs - egt.lastGoodMs) / 1000.0f;
     if (dtS > 0.05f) egt.gradientCps = ((float)tc - egt.c) / dtS;
@@ -995,6 +1017,11 @@ void initSdLogging() {
   for (uint16_t i = 0; i < 1000; i++) {
     snprintf(sdLogPath, sizeof(sdLogPath), "/ECU%03u.CSV", i);
     if (!SD.exists(sdLogPath)) break;
+    if (i == 999) {
+      Serial.println("SD LOG: WARNING - all 1000 slots full! Delete old files. Using ECU999.CSV (appending).");
+      // sdLogPath already holds "/ECU999.CSV"; appending will add a header mid-file.
+      // Operator must manually clear SD card.
+    }
   }
 
   sdAppendLine("ms,type,mode,stage,egtC,dEgtCps,rpm,targetRpm,pumpUs,flowMlMin,fuelTargetUs,starterUs,ign,valve1,valve2,throttlePct,abortReason,event");
@@ -1393,6 +1420,10 @@ bool canStartAutoIdle(String& why) {
 
   if (!cfg.autoStartEnabled) { why = "auto-start disabled; use arm2 then autostart on"; return false; }
   if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { why = "ECU not in WAITING/ABORTED"; return false; }
+  if (ecuMode == MODE_ABORTED && !abortAcknowledged) {
+    why = String("ABORT not acknowledged (reason: ") + lastAbortReason + "). Type clearabort first.";
+    return false;
+  }
 
   bool dry = dryStartRequested();
   if (cfg.requireEgtForStart && !egt.ok && !dry) {
@@ -1497,7 +1528,7 @@ void updateStarting() {
   switch (startStage) {
     case ST_PURGE:
       startUs = cfg.starterPurgeUs; pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false);
-      if (millis() - stageEnteredMs >= cfg.purgeTimeMs) { enterStage(ST_SPINUP_PREHEAT); Serial.println("START STAGE -> SPINUP_PREHEAT"); }
+      if (millis() - stageEnteredMs >= cfg.purgeTimeMs) { resetRpmStats(); enterStage(ST_SPINUP_PREHEAT); Serial.println("START STAGE -> SPINUP_PREHEAT"); }
       break;
     case ST_SPINUP_PREHEAT:
       startUs = cfg.starterSpinUs; pumpUs = ESC_SAFE_US; ignCmd = true; fuelValvesAuto(false);
@@ -1760,6 +1791,18 @@ void handleCommand(String cmd) {
   if (cmd == "web off") { stopWebServer(); return; }
   if (cmd == "stop") { requestStop(); return; }
   if (cmd == "off" || cmd == "stage2off") { stage2Off(); return; }
+  if (cmd == "clearabort") {
+    if (ecuMode != MODE_ABORTED && ecuMode != MODE_WAITING) { Serial.println("ERROR: clearabort only valid in ABORTED/WAITING mode."); return; }
+    if (!egtSafeForAbortClear()) {
+      Serial.print("CLEARABORT BLOCKED: EGT still hot (");
+      if (egt.ok) { Serial.print(egt.c, 1); Serial.print("C"); } else { Serial.print(egtFaultString(egt.fault)); }
+      Serial.println("). Wait for engine to cool.");
+      return;
+    }
+    abortAcknowledged = true;
+    Serial.print("ABORT acknowledged (was: "); Serial.print(lastAbortReason); Serial.println("). ECU ready to arm.");
+    return;
+  }
   if (cmd == "arm2") { armStage2(); return; }
   if (cmd == "autostart on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } cfg.autoStartEnabled = true; Serial.println("AUTO-START ENABLED."); return; }
   if (cmd == "autostart off") { cfg.autoStartEnabled = false; Serial.println("AUTO-START DISABLED."); return; }
@@ -1894,7 +1937,14 @@ void setup() {
 
 void loop() {
   if (webStarted) server.handleClient();
-  if (Serial.available()) handleCommand(Serial.readStringUntil('\n'));
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n') {
+      if (serialCmdBuf.length()) { handleCommand(serialCmdBuf); serialCmdBuf = ""; }
+    } else if (c != '\r') {
+      if (serialCmdBuf.length() < 80) serialCmdBuf += c;
+    }
+  }
   handleUserButton();
   if (manualIgnOffAtMs > 0 && millis() >= manualIgnOffAtMs) { ignCmd = false; manualIgnOffAtMs = 0; applyOutputs(); Serial.println("GLOW AUTO OFF."); }
   if (manualStartOffAtMs > 0 && millis() >= manualStartOffAtMs) { startUs = ESC_SAFE_US; manualStartOffAtMs = 0; applyOutputs(); Serial.println("STARTER AUTO OFF."); }
