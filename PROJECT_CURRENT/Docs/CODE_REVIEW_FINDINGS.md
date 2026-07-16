@@ -130,6 +130,52 @@ Fix sau (ít quan trọng hơn):
 
 ---
 
+# 🔁 Review Vòng 2 (2026-07-16) — 9 lỗi mới, đã fix toàn bộ
+
+Sau khi fix 8 lỗi vòng 1, chạy thêm một vòng review sâu (8 finder angles +
+verify) và tìm được **9 lỗi mới**. Tất cả đã được fix và firmware đã
+compile sạch (`g++ -fsyntax-only -Wall -Wextra`, không warning).
+
+## 🔴 CRITICAL — An toàn nhiên liệu
+
+| # | Vị trí | Lỗi | Cách fix |
+|---|--------|-----|---------|
+| 1 | `pumptest` / `test pump` | Mở van + bơm nhiên liệu khi ở MODE_ABORTED mà không kiểm tra EGT → có thể phun nhiên liệu vào buồng đốt còn nóng sau abort OVER_TEMP | Thêm `fuelCommandBlockedByHotEgt()`: chặn khi EGT đọc được và > `cooldownTargetC` |
+| 2 | `checkFailures()` | Guard RPM_SIGNAL_LOST bỏ sót `ST_INTRO_FUEL`/`ST_POST_IGNITION_HEAT` → mất tín hiệu RPM khi van nhiên liệu đang mở không bị abort trong tối đa 6s | Guard mới bao trùm cả `MODE_STARTING` (mọi stage có nhiên liệu) |
+
+## 🟠 HIGH — Độ tin cậy RPM & state machine
+
+| # | Vị trí | Lỗi | Cách fix |
+|---|--------|-----|---------|
+| 3 | `rpmISR()` | Glitch bị reject vẫn cho glitch kế tiếp lọt qua filter → phantom RPM → có thể kích OVERSPEED giả | Thêm **adaptive mask**: reject cạnh đến sớm hơn ½ chu kỳ hợp lệ gần nhất (turbine không thể tăng đôi tốc độ trong 1 vòng) |
+| 4 | `updateRpm()` | `nowUs = micros()` lấy trước `noInterrupts()` → ISR chen giữa gây wraparound uint32 → `signalRecent=false` giả → abort RPM_SIGNAL_LOST oan | Dời `micros()` ra **sau** critical section (đảm bảo `nowUs >= lastPulseUs`) |
+| 5 | `egtSafeForAbortClear()` | Cảm biến EGT hỏng vĩnh viễn (`egt.ok=false`) chặn TẤT CẢ đường thoát MODE_ABORTED → kẹt cứng, phải cúp nguồn | Thêm `egtAllowsDeliberateAbortClear()` + lệnh `clearabort force` (chỉ dry-start sau đó) |
+| 6 | `beginAutoIdle()` | Không xóa `activeTest`/`activeTestEndMs` → timer test đang chạy bắn giữa chu trình start thật, dừng starter | Xóa `activeTest = TEST_NONE; activeTestEndMs = 0;` khi bắt đầu start |
+| 7 | `ST_INTRO_FUEL` dòng 1542 | Check NO_RPM_RISE (`fuelConfirmTimeoutMs`=10s) là **dead code** vì NO_IGNITION (6s) luôn abort trước | Chuyển check sang neo theo `ignitionDetectedMs`, chạy trong POST_IGN + ACCEL_TO_IDLE (`checkPostIgnitionRpmRise()`) |
+
+## 🟡 MEDIUM — Hiệu năng / độ bền
+
+| # | Vị trí | Lỗi | Cách fix |
+|---|--------|-----|---------|
+| 8 | `sdAppendLine()` | SD open/close đồng bộ mỗi event → block main loop 10–100ms trên thẻ chậm, trễ `checkFailures()` | Hàng đợi SD event: snapshot lúc phát sinh, ghi (blocking) trong loop **sau** safety check |
+| 9 | `webStatusJson()` | ~25 lần `String +=` không `reserve()` → phân mảnh heap mỗi 700ms poll → nguy cơ Guru Meditation | Thêm `s.reserve(896)` |
+
+## ✅ Kết luận vòng 2
+
+- Firmware **compile sạch** với mock ESP32/Servo/MAX31855/WiFi/WebServer/SD.
+- Đã trace toàn bộ luồng: `WAITING → PURGE → SPINUP_PREHEAT → INTRO_FUEL
+  (đánh lửa) → POST_IGNITION_HEAT → ACCEL_TO_IDLE → IDLING`. Các fix
+  **không phá vỡ** luồng chạy tới đánh lửa và idle.
+- Các interlock để chạy wet start thật: `arm2` → `autostart on` → chạy đủ
+  Test Wizard + `confirmkill` → `startidle`.
+
+**Còn lại (tùy chọn, không chặn test)**: dry-start hiện bỏ qua toàn bộ
+checklist kể cả `TEST_KILL` — cân nhắc vẫn yêu cầu xác nhận kill switch cho
+dry-start vì starter vẫn quay trục thật (rủi ro thấp: dry-start không có
+nhiên liệu/lửa).
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-16
+**Lần cập nhật**: 2026-07-16 (vòng 2)
