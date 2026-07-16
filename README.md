@@ -1,9 +1,69 @@
-# Ardu_ECU- Arduino based ECU for model Jet Engines
+# Ardu_ECU - Arduino based ECU for Model Jet Engines
 
-Easy to build and use Engine Control Unit (ECU) for model Jet engines :
+Easy to build and use Engine Control Unit (ECU) for model Jet engines.
+
+## 🚀 Quick Start - CURRENT PROJECT
+
+**Active Project Files** (Start Here):
+- 📄 **[PROJECT_CURRENT/](PROJECT_CURRENT/)** - Your current project (3 files)
+  - `ECU_TestV1_EGT_DRY_START_PATCH.ino` - Main firmware
+  - `RPM_Sensor_20260709.net` - RPM sensor schematic
+  - `SCH_MinijetengineECU_20260709.json` - ECU design schema
+
+**Reference Materials** (For Learning):
+- 📚 **[REFERENCES/](REFERENCES/)** - Cloned project files (for reference only)
+  - Firmware from various versions (Rev9-Rev12, TestV1)
+  - Hardware designs and 3D models
+  - Old manuals and documentation
+
+---
+
+## 📂 Project Structure
+
+```
+Ardu_ECU/
+│
+├── 📁 PROJECT_CURRENT/          ← Your Active Project (3 files)
+│   ├── ECU_TestV1_EGT_DRY_START_PATCH.ino
+│   ├── RPM_Sensor_20260709.net
+│   ├── SCH_MinijetengineECU_20260709.json
+│   └── README.md               ← Start here!
+│
+├── 📁 REFERENCES/              ← Reference Materials (Archive)
+│   ├── Firmware/               ← Old firmware versions (Rev9-Rev12)
+│   ├── Hardware/               ← Schematics, 3D models, components
+│   ├── Documentation/          ← Old manuals and guides
+│   └── README.md               ← Reference guide
+│
+├── 📄 README.md               ← This file
+├── 📄 PROJECT_REVIEW.md       ← Comprehensive project analysis
+├── 📄 STRUCTURE.md            ← Detailed structure explanation
+│
+└── 📄 Original Project Docs (from main repo)
+```
+
+---
+
+## 🎯 What to Do
+
+### ✅ For Current Project Development:
+1. Go to **[PROJECT_CURRENT/](PROJECT_CURRENT/)** 
+2. Read `PROJECT_CURRENT/README.md`
+3. Use the 3 files for your active work
+4. Upload `ECU_TestV1_EGT_DRY_START_PATCH.ino` to ESP32
+
+### 📚 For Learning/Reference:
+1. Explore **[REFERENCES/](REFERENCES/)** folder
+2. Study different firmware versions
+3. Review old hardware designs
+4. Read legacy manuals
+
+---
+
+## Project Overview
 
 * Based on Arduino code and running on ESP32 based hardware
-* ECU configuration using a simpe web browser
+* ECU configuration using a simple web browser
 * Engine operating parameters displayed using a web browser interface
 * Use off the shelf components for electronics e.g.
         Brushed or brushless Speed controller for starter motor and fuel pump control

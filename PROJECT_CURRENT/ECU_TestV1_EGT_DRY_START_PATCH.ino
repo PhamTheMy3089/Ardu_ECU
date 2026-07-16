@@ -1,0 +1,1919 @@
+/*
+  ESP32 Test ECU V1 - Serial Preview Firmware
+  Pins: MAX31855 CLK=18 CS=5 DO=19, RPM=33, PUMP=26, START=25,
+        VALVE1=17, VALVE2=16, IGN/GLOW=32.
+  Web UI + Serial Monitor. Auto-start is disabled at boot.
+  User button: GPIO22 active-low, short press=status/log, hold=ARM/START/CLEAR, running press=soft stop.
+  Status LED: onboard GPIO2 active-low.
+  SD logging: light CSV log on SPI microSD module, CS=13 SCK=14 MOSI=23 MISO=27.
+
+  Rev noise-diagnostics + RPM guard:
+  - RPM ISR records accepted count, raw edges, rejected/glitch edges.
+  - REST RPM guard rejects isolated pulses while WAITING and all outputs are OFF.
+  - Commands: rpmdetail, rpmdetail on/off, set rpmfilter <us>, set rpmedge rising|falling, rpmreset.
+
+  Rev hybrid-fuel-control:
+  - Keeps PumpPoint calibration table for us <-> ml/min estimate and hard pump limits.
+  - Adds Ardu_ECU-style fuelTargetUs/fuelNow control: target RPM decides whether to nudge fuel target up/down.
+  - pumpUs still ramps one microsecond at a time with accel/decel delays; no direct jump to target.
+
+  Rev WebUI + Test Wizard:
+  - ESP32 SoftAP: ECU_TestV1 / admin1234, http://192.168.4.1
+  - Dashboard, controls, Test Wizard, checklist interlock, and event log.
+
+  Rev safety patch:
+  - Adds ACCEL_TO_IDLE timeout to avoid holding fuel/starter indefinitely.
+  - Adds real cooldown airflow using starter after soft stop/abort. Fuel, valves and igniter stay OFF during cooldown.
+
+  Rev EGT-open dry-start patch:
+  - If thermocouple/MAX31855 is OPEN, startidle is no longer hard-blocked by EGT.
+  - In that case startidle automatically becomes DRY START/RPM TEST: starter runs, but PUMP, VALVES and IGN stay OFF.
+  - Real fuel start still requires valid EGT. This avoids blind fueling with no temperature feedback.
+  - Serial pumptest now has an auto-timeout to avoid accidentally leaving the pump running.
+*/
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <SD.h>
+#include <math.h>
+#include <ESP32Servo.h>
+#include <Adafruit_MAX31855.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+#define PIN_EGT_CLK    18
+#define PIN_EGT_CS      5
+#define PIN_EGT_DO     19
+#define PIN_RPM        33
+#define PIN_ESC_PUMP   26
+#define PIN_ESC_START  25
+#define PIN_VALVE_1    17
+#define PIN_VALVE_2    16
+#define PIN_IGN        32
+#define PIN_USER_BTN   22   // USER/ARM/START/SOFT-STOP button, active LOW
+#define PIN_STATUS_LED  2    // onboard NodeMCU-32S LED, active LOW on tested board
+#define PIN_SD_CS      13   // SPI microSD CS
+#define PIN_SD_SCK     14   // SPI microSD SCK/CLK
+#define PIN_SD_MOSI    23   // SPI microSD MOSI/DI
+#define PIN_SD_MISO    27   // SPI microSD MISO/DO
+
+static const bool IGN_ACTIVE_HIGH = true;
+static const bool VALVE_ACTIVE_HIGH = true;
+static const bool AUTO_OPEN_V1_WITH_FUEL = true;
+static const bool AUTO_OPEN_V2_WITH_FUEL = true;
+
+static const int ESC_SAFE_US = 1000;
+static const int ESC_MIN_US  = 1000;
+static const int ESC_MAX_US  = 2000;
+static const uint32_t RPM_SAMPLE_MS = 100;
+static const uint32_t RPM_SIGNAL_TIMEOUT_MS = 1000;
+// RPM guard: while ECU is WAITING and every output is OFF, any isolated RPM edge is treated as noise.
+// This prevents 1-3 fake pulses from being interpreted as 250..1500 RPM.
+static const uint32_t RPM_REST_GUARD_MAX_US = ESC_SAFE_US + 5;
+static const uint32_t EGT_READ_PERIOD_MS = 120;
+static const uint32_t STATUS_PRINT_MS = 250;
+static const uint32_t STAGE2_ARM_TIME_MS = 10000;
+static const uint32_t STARTER_PROVE_TIMEOUT_MS = 1500;
+static const uint32_t SD_LOG_PERIOD_MS = 500;       // light telemetry logging: 2 lines/sec while active
+static const uint32_t SD_SPI_HZ = 1000000;          // tested OK after FAT32 format; lower to 400000 if needed
+
+// GPIO22 USER button logic, active-low.
+// WAITING: short=status, hold 2s=ARM. ARMED: hold 3s=START IDLE.
+// STARTING/IDLING/OPERATING: any press=SOFT STOP. ABORTED: hold 2s=clear if EGT safe.
+static const bool USER_BTN_ACTIVE_LOW = true;
+static const bool STATUS_LED_ACTIVE_LOW = true;  // tested: LOW = LED ON, HIGH = LED OFF
+static const uint32_t BTN_DEBOUNCE_MS = 35;
+static const uint32_t BTN_ARM_HOLD_MS = 2000;
+static const uint32_t BTN_START_HOLD_MS = 3000;
+static const uint32_t BTN_CLEAR_ABORT_HOLD_MS = 2000;
+// Software glitch filter for RPM input.
+// 120us still allows about 500,000 RPM at 1 pulse/rev.
+// Increase to 200..500us if glow/starter creates narrow false pulses.
+volatile uint32_t rpmMinPulseUs = 120;
+int rpmEdgeMode = RISING;
+
+struct PumpPoint { int us; float mlMin; };
+static const PumpPoint kPumpMap[] = {
+  {1000, 0.0f}, {1160, 50.0f}, {1175, 80.0f}, {1250, 265.0f},
+  {1260, 280.0f}, {1265, 360.0f}, {1270, 560.0f}, {1300, 600.0f}
+};
+static const size_t kPumpMapCount = sizeof(kPumpMap) / sizeof(kPumpMap[0]);
+
+struct Config {
+  bool autoStartEnabled = false;
+  bool requireEgtForStart = true;
+  // If EGT is OPEN during startidle, allow only a dry starter/RPM test.
+  // PUMP, VALVES and IGN are forced OFF in dry mode. Real fuel start still requires EGT OK.
+  bool allowDryStartWhenEgtFault = true;
+  uint32_t dryStartRunMs = 5000;
+  bool requireRpmForStart = true;
+  bool abortOnEgtFault = true;
+  bool abortOnRpmFault = true;
+  uint8_t pulsesPerRev = 1;
+
+  int ignitionThresholdC = 100;
+  int maxEgtC = 680;
+  int startTargetEgtC = 500;
+  int maxTempGradientCps = 200;
+
+  int maxRpm = 110000;
+  int idleRpm = 42000;          // preview, cần tune theo engine thật
+  int rpmTolerance = 5000;      // Ardu_ECU-style RPM deadband around target RPM
+  int flameoutRpm = 15000;
+  int starterReleaseRpm = 24000;
+  int fuelConfirmRpm = 18000;
+  int starterProveMinRpm = 500;
+
+  uint32_t purgeTimeMs = 3000;
+  uint32_t preheatMs = 2500;
+  uint32_t noIgnitionTimeoutMs = 6000;
+  uint32_t fuelConfirmTimeoutMs = 10000;
+  uint32_t postIgnitionHeatMs = 1500;
+  uint32_t starterReleaseHoldMs = 1500;
+  uint32_t idleStabilizeMs = 2000;
+
+  // Safety patch: do not stay in ACCEL_TO_IDLE forever.
+  // If idle RPM is not reached within this window, fuel/ignition are cut and cooldown starts.
+  uint32_t accelToIdleTimeoutMs = 20000;
+
+  // Safety patch: real cooldown airflow after soft stop/abort.
+  // Fuel, valves and igniter remain OFF while starter gently moves air through the engine.
+  uint32_t cooldownMinMs = 5000;
+  uint32_t cooldownTimeoutMs = 45000;
+  int cooldownTargetC = 120;
+  int cooldownStarterUs = 1100;
+
+  // Fuel output ramp delays. Low-RPM delays are intentionally slower, similar to Ardu_ECU.
+  uint32_t accelStepDelayMs = 100;
+  uint32_t decelStepDelayMs = 120;
+  uint32_t lowAccelStepDelayMs = 600;
+  uint32_t lowDecelStepDelayMs = 500;
+
+  // Hybrid fuel controller nudges target by us, then pumpUs follows target slowly.
+  int fuelStepUs = 1;           // normal closed-loop correction step
+  int fuelCutStepUs = 5;        // stronger cut for overtemp/overspeed
+
+  int starterPurgeUs = 1100;
+  int starterSpinUs = 1150;
+  int starterAssistUs = 1200;
+
+  int introFuelUs = 1160;       // ~50 ml/min
+  int idleFuelUs = 1175;        // ~80 ml/min preview
+  int maxFuelUs = 1260;         // ~280 ml/min preview
+
+  bool requireChecklistForStart = true; // require Test Wizard PASS before startidle
+  bool webEnabled = true;               // SoftAP Web UI enabled by default
+  bool sdLoggingEnabled = true;         // light CSV SD logging enabled by default
+} cfg;
+
+enum EcuMode : uint8_t { MODE_WAITING, MODE_STARTING, MODE_IDLING, MODE_OPERATING, MODE_COOLDOWN, MODE_ABORTED };
+enum StartStage : uint8_t { ST_NONE, ST_PURGE, ST_SPINUP_PREHEAT, ST_INTRO_FUEL, ST_POST_IGNITION_HEAT, ST_ACCEL_TO_IDLE };
+
+EcuMode ecuMode = MODE_WAITING;
+StartStage startStage = ST_NONE;
+uint32_t modeEnteredMs = 0, stageEnteredMs = 0, starterAboveReleaseSinceMs = 0, lastPumpStepMs = 0;
+bool cooldownAfterAbort = false;
+bool stage2Armed = false;
+uint32_t stage2ArmUntilMs = 0, manualIgnOffAtMs = 0, manualStartOffAtMs = 0;
+String lastAbortReason = "NONE";
+int throttlePct = 0;
+
+Servo escPump, escStart;
+Adafruit_MAX31855 thermo(PIN_EGT_CLK, PIN_EGT_CS, PIN_EGT_DO);
+
+void IRAM_ATTR rpmISR();
+bool canStartAutoIdle(String& why);
+void beginAutoIdle();
+void printStatus(bool force);
+void handleCommand(String cmd);
+String egtFaultString(uint8_t f);
+void addLog(const String& msg);
+bool checklistPassed(String& why);
+bool dryStartRequested();
+bool checklistPassedForAutoStart(String& why);
+void updateDryStarting();
+void printChecklist();
+void resetChecklist();
+void enterCooldown(bool afterAbort, const String& reason);
+void runTestByName(const String& name);
+void updateActiveTest();
+void setupWebServer();
+void startWebServer();
+void stopWebServer();
+void updateStatusLed();
+void initSdLogging();
+void updateSdTelemetry();
+void sdLogEvent(const String& msg);
+void printSdStatus();
+String webStatusJson();
+String htmlPage();
+
+int pumpUs = ESC_SAFE_US, startUs = ESC_SAFE_US;
+int fuelTargetUs = ESC_SAFE_US;   // Ardu_ECU-style target; pumpUs is the actual output now
+int fuelTargetRpm = 0;            // current RPM target used by hybrid fuel controller
+bool ignCmd = false, valve1Cmd = false, valve2Cmd = false;
+bool dryStartActive = false;  // true only when EGT is OPEN and startidle is converted to dry starter/RPM test
+
+struct EgtState {
+  bool ok = false;
+  float c = NAN, prevC = NAN, gradientCps = 0.0f;
+  uint8_t fault = 0;
+  uint32_t lastReadMs = 0, lastGoodMs = 0;
+} egt;
+
+volatile uint32_t isrLastRawEdgeUs = 0;
+volatile uint32_t isrLastAcceptedPulseUs = 0;
+volatile uint32_t isrLastPeriodUs = 0;
+volatile uint32_t isrRawEdges = 0;
+volatile uint32_t isrAcceptedPulses = 0;
+volatile uint32_t isrRejectedEdges = 0;
+volatile uint32_t isrAcceptedIntervals = 0;
+volatile uint32_t isrMinDtUs = 0xFFFFFFFFUL;
+volatile uint32_t isrMaxDtUs = 0;
+volatile uint64_t isrSumDtUs = 0;
+
+enum RpmNoiseLevel : uint8_t { RPM_CLEAN, RPM_WARN, RPM_NOISY, RPM_REST_NOISE, RPM_NO_SIGNAL };
+
+struct RpmState {
+  float rpm = 0.0f;
+  float rpmWindow = 0.0f;
+  float rpmPeriod = 0.0f;
+  float avgIntervalUs = 0.0f;
+  float jitterPct = 0.0f;
+  float rejectPct = 0.0f;
+  float rpmDiffPct = 0.0f;
+  bool signalRecent = false;
+  bool restGuardActive = false;
+  bool restPulseNoise = false;
+  uint32_t acceptedWindow = 0;
+  uint32_t rawEdges = 0;
+  uint32_t rejectedEdges = 0;
+  uint32_t validIntervals = 0;
+  uint32_t lastPeriodUs = 0;
+  uint32_t minIntervalUs = 0;
+  uint32_t maxIntervalUs = 0;
+  uint32_t filterUs = 0;
+  uint32_t lastComputedMs = 0;
+  uint32_t lastComputedUs = 0;
+  uint32_t lastAcceptedPulseUsSnapshot = 0;
+  int pinLevel = 0;
+  RpmNoiseLevel noise = RPM_NO_SIGNAL;
+} rpmData;
+uint32_t lastStatusPrintMs = 0;
+bool rpmDetailMode = false;   // OFF by default: basic status line only
+
+// ===== Web UI =====
+static const char* WEB_SSID = "ECU_TestV1";
+static const char* WEB_PASS = "admin1234";
+IPAddress webIp(192, 168, 4, 1);
+IPAddress webGateway(192, 168, 4, 1);
+IPAddress webSubnet(255, 255, 255, 0);
+WebServer server(80);
+bool webRoutesReady = false;
+bool webStarted = false;
+
+// ===== SD logging =====
+SPIClass sdSPI(VSPI);
+bool sdOk = false;
+char sdLogPath[24] = "/ECU000.CSV";
+uint32_t lastSdTelemetryMs = 0;
+uint32_t sdWriteFailCount = 0;
+
+// ===== Event log =====
+static const uint8_t LOG_COUNT = 16;
+String eventLog[LOG_COUNT];
+uint8_t eventLogHead = 0;
+
+// ===== Test Wizard / Checklist =====
+enum TestId : int8_t {
+  TEST_EGT = 0,
+  TEST_RPM_NOISE,
+  TEST_IGN,
+  TEST_STARTER,
+  TEST_STARTER_IGN,
+  TEST_VALVE1,
+  TEST_VALVE2,
+  TEST_PUMP,
+  TEST_KILL,
+  TEST_COUNT,
+  TEST_NONE = -1
+};
+
+enum TestResult : uint8_t { TEST_NOT_RUN, TEST_RUNNING, TEST_PASS, TEST_FAIL };
+
+struct ChecklistItem {
+  const char* name;
+  TestResult result;
+  String note;
+  uint32_t lastMs;
+};
+
+ChecklistItem checklist[TEST_COUNT] = {
+  {"EGT", TEST_NOT_RUN, "Not run", 0},
+  {"RPM_NOISE", TEST_NOT_RUN, "Not run", 0},
+  {"IGN_PULSE", TEST_NOT_RUN, "Not run", 0},
+  {"STARTER", TEST_NOT_RUN, "Not run", 0},
+  {"STARTER_IGN_EMI", TEST_NOT_RUN, "Not run", 0},
+  {"VALVE_1", TEST_NOT_RUN, "Not run", 0},
+  {"VALVE_2", TEST_NOT_RUN, "Not run", 0},
+  {"PUMP_PRIME", TEST_NOT_RUN, "Not run", 0},
+  {"KILL_SWITCH", TEST_NOT_RUN, "Not confirmed", 0}
+};
+
+TestId activeTest = TEST_NONE;
+uint32_t activeTestEndMs = 0;
+uint32_t manualPumpOffAtMs = 0;
+
+
+// USER button debounce/state
+bool btnRawLastPressed = false;
+bool btnStablePressed = false;
+uint32_t btnLastRawChangeMs = 0;
+uint32_t btnPressedAtMs = 0;
+bool btnActionDone = false;
+
+void writeActiveDigital(uint8_t pin, bool on, bool activeHigh) { digitalWrite(pin, (on == activeHigh) ? HIGH : LOW); }
+const char* modeName(EcuMode m) { switch(m){case MODE_WAITING:return "WAITING";case MODE_STARTING:return "STARTING";case MODE_IDLING:return "IDLING";case MODE_OPERATING:return "OPERATING";case MODE_COOLDOWN:return "COOLDOWN";case MODE_ABORTED:return "ABORTED";default:return "UNKNOWN";} }
+const char* stageName(StartStage s) { switch(s){case ST_NONE:return "NONE";case ST_PURGE:return "PURGE";case ST_SPINUP_PREHEAT:return "SPINUP_PREHEAT";case ST_INTRO_FUEL:return "INTRO_FUEL";case ST_POST_IGNITION_HEAT:return "POST_IGN_HEAT";case ST_ACCEL_TO_IDLE:return "ACCEL_TO_IDLE";default:return "UNKNOWN";} }
+const char* rpmNoiseName(RpmNoiseLevel n) {
+  switch (n) {
+    case RPM_CLEAN: return "CLEAN";
+    case RPM_WARN: return "WARN";
+    case RPM_NOISY: return "NOISY";
+    case RPM_REST_NOISE: return "REST_NOISE";
+    case RPM_NO_SIGNAL: return "NO_SIGNAL";
+    default: return "UNKNOWN";
+  }
+}
+
+const char* rpmEdgeName() {
+  return (rpmEdgeMode == FALLING) ? "FALLING" : "RISING";
+}
+
+bool rpmAtRestGuardCondition() {
+  return ecuMode == MODE_WAITING && startStage == ST_NONE &&
+         startUs <= (int)RPM_REST_GUARD_MAX_US &&
+         pumpUs <= (int)RPM_REST_GUARD_MAX_US &&
+         !ignCmd && !valve1Cmd && !valve2Cmd;
+}
+
+bool rpmNoiseBlocksStart() {
+  return rpmData.noise == RPM_REST_NOISE || rpmData.noise == RPM_NOISY;
+}
+
+bool rpmMeasurementUsable() {
+  return rpmData.signalRecent && rpmData.rpm > 0.0f &&
+         rpmData.noise != RPM_NOISY && rpmData.noise != RPM_REST_NOISE;
+}
+
+const char* rpmSignalName() {
+  if (rpmData.noise == RPM_REST_NOISE) return "REST_NOISE";
+  if (rpmData.noise == RPM_NOISY) return "NOISY";
+  return rpmData.signalRecent ? "OK" : "LOST";
+}
+
+RpmNoiseLevel classifyRpmNoise(bool recent, uint32_t raw, uint32_t accepted, uint32_t rejected,
+                               float rejectPct, float jitterPct, float rpmDiffPct, uint32_t intervals) {
+  if (!recent && raw == 0) return RPM_NO_SIGNAL;
+  if (raw > 0 && accepted == 0) return RPM_NOISY;
+  if (rejected >= 3 || rejectPct > 20.0f ||
+      (intervals >= 5 && jitterPct > 30.0f) ||
+      (rpmDiffPct > 30.0f)) return RPM_NOISY;
+  if (rejected > 0 || rejectPct > 5.0f ||
+      (intervals >= 3 && jitterPct > 15.0f) ||
+      (rpmDiffPct > 15.0f)) return RPM_WARN;
+  return RPM_CLEAN;
+}
+
+void attachRpmInterrupt() {
+  detachInterrupt(PIN_RPM);
+  attachInterrupt(digitalPinToInterrupt(PIN_RPM), rpmISR, rpmEdgeMode);
+}
+
+
+String egtFaultString(uint8_t f) {
+  if (f == 0) return "SPI/WIRING";
+  String s = "";
+  if (f & MAX31855_FAULT_OPEN) s += "OPEN ";
+  if (f & MAX31855_FAULT_SHORT_GND) s += "SHORT_GND ";
+  if (f & MAX31855_FAULT_SHORT_VCC) s += "SHORT_VCC ";
+  s.trim(); return s;
+}
+
+float flowFromUs(int us) {
+  if (us <= kPumpMap[0].us) return kPumpMap[0].mlMin;
+  if (us >= kPumpMap[kPumpMapCount - 1].us) return kPumpMap[kPumpMapCount - 1].mlMin;
+  for (size_t i = 1; i < kPumpMapCount; i++) if (us <= kPumpMap[i].us) {
+    float x0 = kPumpMap[i-1].us, x1 = kPumpMap[i].us, y0 = kPumpMap[i-1].mlMin, y1 = kPumpMap[i].mlMin;
+    return y0 + ((float)us - x0) * (y1 - y0) / (x1 - x0);
+  }
+  return kPumpMap[kPumpMapCount - 1].mlMin;
+}
+
+int usFromFlow(float mlMin) {
+  if (mlMin <= kPumpMap[0].mlMin) return kPumpMap[0].us;
+  if (mlMin >= kPumpMap[kPumpMapCount - 1].mlMin) return kPumpMap[kPumpMapCount - 1].us;
+  for (size_t i = 1; i < kPumpMapCount; i++) if (mlMin <= kPumpMap[i].mlMin) {
+    float y0 = kPumpMap[i-1].mlMin, y1 = kPumpMap[i].mlMin, x0 = kPumpMap[i-1].us, x1 = kPumpMap[i].us;
+    return (int)lroundf(x0 + (mlMin - y0) * (x1 - x0) / (y1 - y0));
+  }
+  return kPumpMap[kPumpMapCount - 1].us;
+}
+
+void applyOutputs() {
+  pumpUs = constrain(pumpUs, ESC_MIN_US, ESC_MAX_US);
+  startUs = constrain(startUs, ESC_MIN_US, ESC_MAX_US);
+  escPump.writeMicroseconds(pumpUs);
+  escStart.writeMicroseconds(startUs);
+  writeActiveDigital(PIN_IGN, ignCmd, IGN_ACTIVE_HIGH);
+  writeActiveDigital(PIN_VALVE_1, valve1Cmd, VALVE_ACTIVE_HIGH);
+  writeActiveDigital(PIN_VALVE_2, valve2Cmd, VALVE_ACTIVE_HIGH);
+}
+
+void fuelValvesAuto(bool on) { valve1Cmd = on && AUTO_OPEN_V1_WITH_FUEL; valve2Cmd = on && AUTO_OPEN_V2_WITH_FUEL; }
+void forceSafeOutputs() { fuelTargetRpm = 0; fuelTargetUs = ESC_SAFE_US; pumpUs = ESC_SAFE_US; startUs = ESC_SAFE_US; ignCmd = valve1Cmd = valve2Cmd = false; applyOutputs(); }
+void enterMode(EcuMode m) {
+  if (ecuMode != m) addLog(String("MODE -> ") + modeName(m));
+  ecuMode = m;
+  modeEnteredMs = millis();
+}
+
+void enterStage(StartStage s) {
+  if (startStage != s) addLog(String("STAGE -> ") + stageName(s));
+  startStage = s;
+  stageEnteredMs = millis();
+}
+void enterWaitingSafe() { dryStartActive = false; cooldownAfterAbort = false; enterMode(MODE_WAITING); enterStage(ST_NONE); throttlePct = 0; forceSafeOutputs(); }
+
+void enterCooldown(bool afterAbort, const String& reason) {
+  dryStartActive = false;
+  cooldownAfterAbort = afterAbort;
+  fuelTargetRpm = 0;
+  fuelTargetUs = ESC_SAFE_US;
+  pumpUs = ESC_SAFE_US;
+  ignCmd = false;
+  fuelValvesAuto(false);
+  startUs = constrain(cfg.cooldownStarterUs, ESC_SAFE_US, ESC_MAX_US);
+  applyOutputs();
+  enterMode(MODE_COOLDOWN);
+  enterStage(ST_NONE);
+  addLog((afterAbort ? String("ABORT -> COOLDOWN: ") : String("SOFT STOP -> COOLDOWN: ")) + reason);
+}
+
+void abortAll(const String& reason) {
+  lastAbortReason = reason;
+  Serial.println();
+  Serial.print("ABORT: ");
+  Serial.print(reason);
+  Serial.println(" -> COOLDOWN");
+  Serial.println();
+  enterCooldown(true, reason);
+}
+
+void requestStop() {
+  lastAbortReason = "NONE";
+  enterCooldown(false, "SOFT_STOP");
+  Serial.println("STOP requested -> COOLDOWN");
+}
+
+bool isStage2Armed() {
+  if (!stage2Armed) return false;
+  if (millis() > stage2ArmUntilMs) { stage2Armed = false; Serial.println("STAGE2 AUTO-DISARMED."); return false; }
+  return true;
+}
+void armStage2() { stage2Armed = true; stage2ArmUntilMs = millis() + STAGE2_ARM_TIME_MS; addLog("ARMED 10s"); Serial.println("WARNING: STAGE2 ARMED FOR 10 SECONDS"); }
+void stage2Off() { stage2Armed = false; manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0; activeTest = TEST_NONE; enterWaitingSafe(); addLog("SAFE OFF"); Serial.println("STAGE2 OFF: outputs safe."); }
+
+
+bool egtSafeForAbortClear() {
+  // Clear ABORT only when thermocouple is valid and below restart threshold.
+  return egt.ok && egt.c <= (cfg.ignitionThresholdC - 10);
+}
+
+void startIdleFromButton() {
+  String why;
+
+  // Button start is a deliberate 2-step action: hold 2s to ARM, then hold 3s to START.
+  // It should not require the Serial-only "autostart on" flag to be left enabled.
+  bool oldAuto = cfg.autoStartEnabled;
+  cfg.autoStartEnabled = true;
+  bool ok = canStartAutoIdle(why);
+  cfg.autoStartEnabled = oldAuto;
+
+  if (!ok) {
+    Serial.print("USER_BTN START BLOCKED: ");
+    Serial.println(why);
+    return;
+  }
+
+  stage2Armed = false;
+  Serial.println("USER_BTN: START IDLE requested.");
+  beginAutoIdle();
+}
+
+void userButtonPressed() {
+  if (ecuMode == MODE_STARTING || ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) {
+    btnActionDone = true;
+    Serial.println("USER_BTN: SOFT STOP.");
+    requestStop();
+  }
+}
+
+void userButtonReleased(uint32_t heldMs) {
+  if (btnActionDone) return;
+
+  if (ecuMode == MODE_WAITING) {
+    Serial.print("USER_BTN SHORT: status/log marker, held=");
+    Serial.print(heldMs);
+    Serial.println(" ms");
+    printStatus(true);
+    return;
+  }
+
+  if (ecuMode == MODE_ABORTED) {
+    Serial.print("USER_BTN SHORT while ABORTED, held=");
+    Serial.print(heldMs);
+    Serial.println(" ms. Hold 2s to clear if EGT is safe.");
+    printStatus(true);
+    return;
+  }
+}
+
+void handleUserButton() {
+  uint32_t now = millis();
+  bool rawPressed = USER_BTN_ACTIVE_LOW ? (digitalRead(PIN_USER_BTN) == LOW) : (digitalRead(PIN_USER_BTN) == HIGH);
+
+  if (rawPressed != btnRawLastPressed) {
+    btnRawLastPressed = rawPressed;
+    btnLastRawChangeMs = now;
+  }
+
+  if ((now - btnLastRawChangeMs) >= BTN_DEBOUNCE_MS && rawPressed != btnStablePressed) {
+    btnStablePressed = rawPressed;
+
+    if (btnStablePressed) {
+      btnPressedAtMs = now;
+      btnActionDone = false;
+      userButtonPressed();
+    } else {
+      uint32_t heldMs = (btnPressedAtMs == 0) ? 0 : (now - btnPressedAtMs);
+      userButtonReleased(heldMs);
+      btnPressedAtMs = 0;
+      btnActionDone = false;
+    }
+  }
+
+  if (!btnStablePressed || btnActionDone) return;
+
+  uint32_t heldMs = now - btnPressedAtMs;
+
+  if (ecuMode == MODE_WAITING) {
+    if (stage2Armed) {
+      if (heldMs >= BTN_START_HOLD_MS) {
+        btnActionDone = true;
+        startIdleFromButton();
+      }
+    } else {
+      if (heldMs >= BTN_ARM_HOLD_MS) {
+        btnActionDone = true;
+        Serial.println("USER_BTN: ARM requested.");
+        armStage2();
+      }
+    }
+    return;
+  }
+
+  if (ecuMode == MODE_ABORTED) {
+    if (heldMs >= BTN_CLEAR_ABORT_HOLD_MS) {
+      btnActionDone = true;
+      if (egtSafeForAbortClear()) {
+        lastAbortReason = "CLEARED_BY_BUTTON";
+        enterWaitingSafe();
+        Serial.println("USER_BTN: ABORT cleared, ECU -> WAITING.");
+      } else {
+        Serial.print("USER_BTN CLEAR BLOCKED: EGT not safe. EGT=");
+        if (egt.ok) {
+          Serial.print(egt.c, 1);
+          Serial.println("C");
+        } else {
+          Serial.print("ERR(");
+          Serial.print(egtFaultString(egt.fault));
+          Serial.println(")");
+        }
+      }
+    }
+  }
+}
+
+
+void writeStatusLed(bool on) {
+  if (STATUS_LED_ACTIVE_LOW) digitalWrite(PIN_STATUS_LED, on ? LOW : HIGH);
+  else digitalWrite(PIN_STATUS_LED, on ? HIGH : LOW);
+}
+
+void blinkStatusLed(uint32_t intervalMs) {
+  static uint32_t lastToggleMs = 0;
+  static bool ledOn = false;
+
+  uint32_t now = millis();
+  if (now - lastToggleMs >= intervalMs) {
+    lastToggleMs = now;
+    ledOn = !ledOn;
+    writeStatusLed(ledOn);
+  }
+}
+
+void updateStatusLed() {
+  // NodeMCU-32S onboard LED is active-low on the tested board:
+  // LOW = ON, HIGH = OFF.
+  // Do not connect any external load to GPIO2; it is a boot strap pin.
+
+  // Component test running: very fast blink.
+  if (activeTest != TEST_NONE) {
+    blinkStatusLed(80);
+    return;
+  }
+
+  // Abort/fault: fast blink.
+  if (ecuMode == MODE_ABORTED) {
+    blinkStatusLed(100);
+    return;
+  }
+
+  // Armed but not starting yet: quick blink.
+  if (stage2Armed && ecuMode == MODE_WAITING) {
+    blinkStatusLed(200);
+    return;
+  }
+
+  // Starting or operating: solid ON.
+  if (ecuMode == MODE_STARTING || ecuMode == MODE_OPERATING) {
+    writeStatusLed(true);
+    return;
+  }
+
+  // Stable idle: medium blink.
+  if (ecuMode == MODE_IDLING) {
+    blinkStatusLed(500);
+    return;
+  }
+
+  // Cooldown: faster-than-waiting blink.
+  if (ecuMode == MODE_COOLDOWN) {
+    blinkStatusLed(300);
+    return;
+  }
+
+  // Waiting/safe: slow heartbeat blink.
+  if (ecuMode == MODE_WAITING) {
+    blinkStatusLed(1000);
+    return;
+  }
+
+  writeStatusLed(false);
+}
+
+void stepPumpToward(int targetUs, uint32_t upDelayMs, uint32_t downDelayMs) {
+  targetUs = constrain(targetUs, ESC_SAFE_US, cfg.maxFuelUs);
+  uint32_t now = millis();
+  if (targetUs > pumpUs && now - lastPumpStepMs >= upDelayMs) { pumpUs++; lastPumpStepMs = now; }
+  else if (targetUs < pumpUs && now - lastPumpStepMs >= downDelayMs) { pumpUs--; lastPumpStepMs = now; }
+}
+
+void setFuelTargetUs(int us) {
+  fuelTargetUs = constrain(us, ESC_SAFE_US, cfg.maxFuelUs);
+}
+
+bool egtAllowsFuelIncrease() {
+  if (!egt.ok) return false;
+  if (egt.c >= cfg.maxEgtC) return false;
+  if (egt.gradientCps >= cfg.maxTempGradientCps) return false;
+  if ((egt.c + 3.0f * egt.gradientCps) >= cfg.maxEgtC) return false; // 3s look-ahead like Ardu_ECU
+  return true;
+}
+
+bool egtRequestsFuelCut() {
+  if (!egt.ok) return true;
+  if (egt.c >= cfg.maxEgtC) return true;
+  if (egt.gradientCps >= cfg.maxTempGradientCps) return true;
+  if ((egt.c + 3.0f * egt.gradientCps) >= cfg.maxEgtC) return true;
+  return false;
+}
+
+void updateFuelClosedLoopToRpm(int targetRpm, int minUs, int maxUs, bool lowRpmRegion) {
+  minUs = constrain(minUs, ESC_SAFE_US, cfg.maxFuelUs);
+  maxUs = constrain(maxUs, minUs, cfg.maxFuelUs);
+  fuelTargetRpm = targetRpm;
+  fuelTargetUs = constrain(fuelTargetUs, minUs, maxUs);
+
+  bool rpmOk = rpmMeasurementUsable() && rpmData.rpm > 1000.0f;
+  bool rpmTooHigh = rpmOk && ((rpmData.rpm > (float)(targetRpm + cfg.rpmTolerance)) || (rpmData.rpm >= (float)cfg.maxRpm));
+  bool rpmTooLow = rpmOk && (rpmData.rpm < (float)targetRpm);
+
+  if (egtRequestsFuelCut() || rpmTooHigh) {
+    fuelTargetUs -= cfg.fuelCutStepUs;
+  } else if (rpmTooLow && egtAllowsFuelIncrease()) {
+    fuelTargetUs += cfg.fuelStepUs;
+  } else {
+    // Ardu_ECU-style: when target is reached, do not keep a queued fuel ramp.
+    fuelTargetUs = pumpUs;
+  }
+
+  fuelTargetUs = constrain(fuelTargetUs, minUs, maxUs);
+  stepPumpToward(fuelTargetUs,
+                 lowRpmRegion ? cfg.lowAccelStepDelayMs : cfg.accelStepDelayMs,
+                 lowRpmRegion ? cfg.lowDecelStepDelayMs : cfg.decelStepDelayMs);
+}
+
+bool rpmSignalRecentWithin(uint32_t timeoutMs) {
+  uint32_t lastUs;
+  noInterrupts();
+  lastUs = isrLastAcceptedPulseUs;
+  interrupts();
+  return lastUs != 0 && ((uint32_t)(micros() - lastUs) <= timeoutMs * 1000UL);
+}
+
+void IRAM_ATTR rpmISR() {
+  uint32_t nowUs = micros();
+  isrRawEdges++;
+
+  if (isrLastRawEdgeUs == 0) {
+    isrLastRawEdgeUs = nowUs;
+    isrLastAcceptedPulseUs = nowUs;
+    isrAcceptedPulses++;
+    return;
+  }
+
+  uint32_t dtRawUs = nowUs - isrLastRawEdgeUs;
+  isrLastRawEdgeUs = nowUs;
+
+  uint32_t filterUs = rpmMinPulseUs;
+  if (dtRawUs < filterUs) {
+    isrRejectedEdges++;
+    return;
+  }
+
+  if (isrLastAcceptedPulseUs != 0) {
+    uint32_t dtAcceptedUs = nowUs - isrLastAcceptedPulseUs;
+    isrLastPeriodUs = dtAcceptedUs;
+    isrAcceptedIntervals++;
+    isrSumDtUs += dtAcceptedUs;
+    if (dtAcceptedUs < isrMinDtUs) isrMinDtUs = dtAcceptedUs;
+    if (dtAcceptedUs > isrMaxDtUs) isrMaxDtUs = dtAcceptedUs;
+  }
+
+  isrLastAcceptedPulseUs = nowUs;
+  isrAcceptedPulses++;
+}
+
+void resetRpmStats() {
+  noInterrupts();
+  isrLastRawEdgeUs = 0;
+  isrLastAcceptedPulseUs = 0;
+  isrLastPeriodUs = 0;
+  isrRawEdges = 0;
+  isrAcceptedPulses = 0;
+  isrRejectedEdges = 0;
+  isrAcceptedIntervals = 0;
+  isrSumDtUs = 0;
+  isrMinDtUs = 0xFFFFFFFFUL;
+  isrMaxDtUs = 0;
+  interrupts();
+  rpmData = RpmState();
+  Serial.println("RPM stats reset.");
+}
+
+void updateRpm() {
+  uint32_t nowMs = millis();
+  if (nowMs - rpmData.lastComputedMs < RPM_SAMPLE_MS) return;
+
+  uint32_t nowUs = micros();
+  uint32_t windowUs = (rpmData.lastComputedUs == 0) ? (RPM_SAMPLE_MS * 1000UL) : (nowUs - rpmData.lastComputedUs);
+  rpmData.lastComputedUs = nowUs;
+  rpmData.lastComputedMs = nowMs;
+
+  uint32_t accepted, raw, rejected, validN, minDt, maxDt, lastPulseUs, lastPeriodUs, filterUs;
+  uint64_t sumDt;
+
+  noInterrupts();
+  accepted = isrAcceptedPulses;
+  raw = isrRawEdges;
+  rejected = isrRejectedEdges;
+  validN = isrAcceptedIntervals;
+  sumDt = isrSumDtUs;
+  minDt = isrMinDtUs;
+  maxDt = isrMaxDtUs;
+  lastPulseUs = isrLastAcceptedPulseUs;
+  lastPeriodUs = isrLastPeriodUs;
+  filterUs = rpmMinPulseUs;
+
+  isrAcceptedPulses = 0;
+  isrRawEdges = 0;
+  isrRejectedEdges = 0;
+  isrAcceptedIntervals = 0;
+  isrSumDtUs = 0;
+  isrMinDtUs = 0xFFFFFFFFUL;
+  isrMaxDtUs = 0;
+  interrupts();
+
+  rpmData.acceptedWindow = accepted;
+  rpmData.rawEdges = raw;
+  rpmData.rejectedEdges = rejected;
+  rpmData.validIntervals = validN;
+  rpmData.lastAcceptedPulseUsSnapshot = lastPulseUs;
+  rpmData.lastPeriodUs = lastPeriodUs;
+  rpmData.minIntervalUs = (minDt == 0xFFFFFFFFUL) ? 0 : minDt;
+  rpmData.maxIntervalUs = maxDt;
+  rpmData.filterUs = filterUs;
+  rpmData.pinLevel = digitalRead(PIN_RPM);
+
+  rpmData.restGuardActive = rpmAtRestGuardCondition();
+
+  rpmData.signalRecent = lastPulseUs != 0 && ((uint32_t)(nowUs - lastPulseUs) <= RPM_SIGNAL_TIMEOUT_MS * 1000UL);
+  rpmData.restPulseNoise = rpmData.restGuardActive && (raw > 0 || accepted > 0 || rpmData.signalRecent);
+
+  rpmData.rejectPct = (raw > 0) ? ((float)rejected * 100.0f / (float)raw) : 0.0f;
+  rpmData.rpmWindow = (accepted > 0 && windowUs > 0) ?
+                      ((float)accepted * 60000000.0f / ((float)windowUs * (float)cfg.pulsesPerRev)) : 0.0f;
+
+  rpmData.rpmPeriod = 0.0f;
+  if (rpmData.signalRecent && lastPeriodUs > 0) {
+    rpmData.rpmPeriod = 60000000.0f / ((float)lastPeriodUs * (float)cfg.pulsesPerRev);
+  }
+
+  if (validN > 0) {
+    rpmData.avgIntervalUs = (float)sumDt / (float)validN;
+    rpmData.jitterPct = (minDt != 0xFFFFFFFFUL && rpmData.avgIntervalUs > 0.0f) ?
+                        ((float)(maxDt - minDt) * 100.0f / rpmData.avgIntervalUs) : 0.0f;
+  } else if (!rpmData.signalRecent) {
+    rpmData.avgIntervalUs = 0.0f;
+    rpmData.jitterPct = 0.0f;
+  }
+
+  rpmData.rpmDiffPct = 0.0f;
+  if (rpmData.rpmWindow > 0.0f && rpmData.rpmPeriod > 0.0f) {
+    float base = max(rpmData.rpmWindow, rpmData.rpmPeriod);
+    rpmData.rpmDiffPct = fabsf(rpmData.rpmWindow - rpmData.rpmPeriod) * 100.0f / base;
+  }
+
+  if (rpmData.restPulseNoise) {
+    // Engine is commanded OFF. Isolated raw/accepted edges here are RPM-at-rest noise,
+    // not valid speed. Keep raw/acc/per diagnostics, but force control RPM to zero.
+    rpmData.rpm = 0.0f;
+    rpmData.signalRecent = false;
+    rpmData.noise = RPM_REST_NOISE;
+  } else {
+    // Outside WAITING/rest state, period RPM reacts quickly; window RPM remains as a diagnostic cross-check.
+    if (rpmData.signalRecent && rpmData.rpmPeriod > 0.0f) rpmData.rpm = rpmData.rpmPeriod;
+    else if (accepted > 0) rpmData.rpm = rpmData.rpmWindow;
+    else rpmData.rpm = 0.0f;
+
+    rpmData.noise = classifyRpmNoise(rpmData.signalRecent, raw, accepted, rejected,
+                                     rpmData.rejectPct, rpmData.jitterPct,
+                                     rpmData.rpmDiffPct, validN);
+  }
+}
+
+void updateEgt() {
+  uint32_t nowMs = millis(); if (nowMs - egt.lastReadMs < EGT_READ_PERIOD_MS) return;
+  egt.lastReadMs = nowMs;
+  double tc = thermo.readCelsius();
+  if (isnan(tc)) { egt.ok = false; egt.fault = thermo.readError(); return; }
+  if (egt.ok && !isnan(egt.c)) {
+    float dtS = (float)(nowMs - egt.lastGoodMs) / 1000.0f;
+    if (dtS > 0.05f) egt.gradientCps = ((float)tc - egt.c) / dtS;
+  } else egt.gradientCps = 0;
+  egt.prevC = egt.c; egt.c = (float)tc; egt.ok = true; egt.fault = 0; egt.lastGoodMs = nowMs;
+}
+
+
+String sdFloat(float v, int decimals) {
+  if (isnan(v) || isinf(v)) return "";
+  return String(v, decimals);
+}
+
+String sdCsvQuote(String s) {
+  s.replace("\"", "\"\"");
+  return String("\"") + s + "\"";
+}
+
+String sdCsvLine(const char* type, const String& eventText) {
+  String line;
+  line.reserve(240);
+  line += String(millis()); line += ",";
+  line += type; line += ",";
+  line += modeName(ecuMode); line += ",";
+  line += stageName(startStage); line += ",";
+  line += sdFloat(egt.ok ? egt.c : NAN, 1); line += ",";
+  line += sdFloat(egt.ok ? egt.gradientCps : NAN, 1); line += ",";
+  line += sdFloat(rpmData.rpm, 0); line += ",";
+  line += String(fuelTargetRpm); line += ",";
+  line += String(pumpUs); line += ",";
+  line += sdFloat(flowFromUs(pumpUs), 1); line += ",";
+  line += String(fuelTargetUs); line += ",";
+  line += String(startUs); line += ",";
+  line += (ignCmd ? "1" : "0"); line += ",";
+  line += (valve1Cmd ? "1" : "0"); line += ",";
+  line += (valve2Cmd ? "1" : "0"); line += ",";
+  line += String(throttlePct); line += ",";
+  line += sdCsvQuote(lastAbortReason); line += ",";
+  line += sdCsvQuote(eventText);
+  return line;
+}
+
+void sdAppendLine(const String& line) {
+  if (!sdOk || !cfg.sdLoggingEnabled) return;
+
+  File f = SD.open(sdLogPath, FILE_APPEND);
+  if (!f) {
+    sdWriteFailCount++;
+    if (sdWriteFailCount == 1 || sdWriteFailCount % 10 == 0) {
+      Serial.print("SD LOG WRITE FAIL count="); Serial.println(sdWriteFailCount);
+    }
+    return;
+  }
+
+  size_t n = f.println(line);
+  f.close();
+  if (n == 0) sdWriteFailCount++;
+}
+
+void sdLogEvent(const String& msg) {
+  sdAppendLine(sdCsvLine("EVENT", msg));
+}
+
+void updateSdTelemetry() {
+  if (!sdOk || !cfg.sdLoggingEnabled) return;
+
+  bool activeForLog = (ecuMode == MODE_STARTING || ecuMode == MODE_IDLING ||
+                       ecuMode == MODE_OPERATING || ecuMode == MODE_COOLDOWN ||
+                       activeTest != TEST_NONE);
+  if (!activeForLog) return;
+
+  uint32_t now = millis();
+  if (now - lastSdTelemetryMs < SD_LOG_PERIOD_MS) return;
+  lastSdTelemetryMs = now;
+
+  sdAppendLine(sdCsvLine("DATA", ""));
+}
+
+void printSdStatus() {
+  Serial.println("===== SD LOG STATUS =====");
+  Serial.print("sdOk="); Serial.println(sdOk ? "OK" : "FAIL/NOT_INIT");
+  Serial.print("sdLoggingEnabled="); Serial.println(cfg.sdLoggingEnabled ? "ON" : "OFF");
+  Serial.print("sdLogPath="); Serial.println(sdLogPath);
+  Serial.print("sdSpiHz="); Serial.println(SD_SPI_HZ);
+  Serial.print("sdWriteFailCount="); Serial.println(sdWriteFailCount);
+  Serial.println("Pins: CS=13 SCK=14 MOSI=23 MISO=27");
+  Serial.println("=========================");
+}
+
+void initSdLogging() {
+  if (!cfg.sdLoggingEnabled) {
+    Serial.println("SD logging disabled by config.");
+    return;
+  }
+
+  sdSPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+  if (!SD.begin(PIN_SD_CS, sdSPI, SD_SPI_HZ)) {
+    sdOk = false;
+    Serial.println("SD LOG: SD.begin() FAIL. ECU continues without SD logging.");
+    Serial.println("Check FAT32 card and pins: CS=13 SCK=14 MOSI=23 MISO=27.");
+    return;
+  }
+
+  uint8_t cardType = SD.cardType();
+  if (cardType == CARD_NONE) {
+    sdOk = false;
+    Serial.println("SD LOG: no card detected. ECU continues without SD logging.");
+    return;
+  }
+
+  sdOk = true;
+  sdWriteFailCount = 0;
+
+  for (uint16_t i = 0; i < 1000; i++) {
+    snprintf(sdLogPath, sizeof(sdLogPath), "/ECU%03u.CSV", i);
+    if (!SD.exists(sdLogPath)) break;
+  }
+
+  sdAppendLine("ms,type,mode,stage,egtC,dEgtCps,rpm,targetRpm,pumpUs,flowMlMin,fuelTargetUs,starterUs,ign,valve1,valve2,throttlePct,abortReason,event");
+  sdLogEvent("BOOT SD_LOG_READY");
+
+  Serial.print("SD LOG: OK file="); Serial.println(sdLogPath);
+  Serial.print("SD LOG: cardSizeMB="); Serial.println(SD.cardSize() / (1024 * 1024));
+}
+
+void addLog(const String& msg) {
+  String line = String(millis() / 1000.0f, 1) + "s " + msg;
+  eventLog[eventLogHead] = line;
+  eventLogHead = (eventLogHead + 1) % LOG_COUNT;
+  Serial.print("LOG: "); Serial.println(line);
+  sdLogEvent(msg);
+}
+
+const char* testResultName(TestResult r) {
+  switch (r) {
+    case TEST_NOT_RUN: return "NOT_RUN";
+    case TEST_RUNNING: return "RUNNING";
+    case TEST_PASS: return "PASS";
+    case TEST_FAIL: return "FAIL";
+    default: return "UNKNOWN";
+  }
+}
+
+void setChecklist(TestId id, TestResult result, const String& note) {
+  if (id < 0 || id >= TEST_COUNT) return;
+  checklist[id].result = result;
+  checklist[id].note = note;
+  checklist[id].lastMs = millis();
+  addLog(String("TEST ") + checklist[id].name + " " + testResultName(result) + " - " + note);
+}
+
+void resetChecklist() {
+  for (int i = 0; i < TEST_COUNT; i++) {
+    checklist[i].result = TEST_NOT_RUN;
+    checklist[i].note = (i == TEST_KILL) ? "Not confirmed" : "Not run";
+    checklist[i].lastMs = 0;
+  }
+  addLog("CHECKLIST RESET");
+  Serial.println("Checklist reset.");
+}
+
+bool checklistPassed(String& why) {
+  for (int i = 0; i < TEST_COUNT; i++) {
+    if (checklist[i].result != TEST_PASS) {
+      why = String(checklist[i].name) + " - " + checklist[i].note;
+      return false;
+    }
+  }
+  why = "OK";
+  return true;
+}
+
+bool dryStartRequested() {
+  // Only used before beginAutoIdle(). If EGT is valid, this is a real guarded start.
+  // If EGT is faulty/open and this option is enabled, startidle becomes a dry starter/RPM test.
+  return cfg.allowDryStartWhenEgtFault && !egt.ok;
+}
+
+bool checklistPassedForAutoStart(String& why) {
+  bool dry = dryStartRequested();
+  if (dry) {
+    // Dry start has no fuel, no valves and no igniter. It is a starter/RPM test,
+    // so do not force the full hot-start checklist just to spin the starter.
+    why = "OK_DRY_START_EGT_BYPASS";
+    return true;
+  }
+
+  for (int i = 0; i < TEST_COUNT; i++) {
+    if (checklist[i].result != TEST_PASS) {
+      why = String(checklist[i].name) + " - " + checklist[i].note;
+      return false;
+    }
+  }
+  why = "OK";
+  return true;
+}
+
+void printChecklist() {
+  Serial.println("===== TEST WIZARD CHECKLIST =====");
+  for (int i = 0; i < TEST_COUNT; i++) {
+    Serial.print(checklist[i].name);
+    Serial.print(" = ");
+    Serial.print(testResultName(checklist[i].result));
+    Serial.print(" | ");
+    Serial.println(checklist[i].note);
+  }
+  String why;
+  Serial.print("CHECKLIST_OVERALL=");
+  Serial.println(checklistPassed(why) ? "PASS" : (String("BLOCKED: ") + why));
+  Serial.print("STARTIDLE_CHECK=");
+  Serial.println(checklistPassedForAutoStart(why) ? (String("PASS: ") + why) : (String("BLOCKED: ") + why));
+  Serial.println("=================================");
+}
+
+bool requireArmAndIdleForTest(TestId id) {
+  if (id == TEST_EGT || id == TEST_RPM_NOISE || id == TEST_KILL) return true;
+  if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first or press ARM in Web UI."); return false; }
+  if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: component tests only while WAITING/ABORTED."); return false; }
+  return true;
+}
+
+void startTimedTest(TestId id, uint32_t durationMs) {
+  activeTest = id;
+  activeTestEndMs = millis() + durationMs;
+  setChecklist(id, TEST_RUNNING, "Running");
+}
+
+void runTestByName(const String& nameIn) {
+  String name = nameIn;
+  name.trim();
+  name.toLowerCase();
+
+  updateRpm(); updateEgt();
+
+  if (name == "egt") {
+    if (egt.ok) setChecklist(TEST_EGT, TEST_PASS, String("EGT OK ") + String(egt.c, 1) + "C");
+    else setChecklist(TEST_EGT, TEST_FAIL, String("EGT fault ") + egtFaultString(egt.fault));
+    return;
+  }
+
+  if (name == "rpm_noise" || name == "rpm") {
+    bool ok = (rpmData.noise == RPM_NO_SIGNAL || rpmData.noise == RPM_CLEAN);
+    setChecklist(TEST_RPM_NOISE, ok ? TEST_PASS : TEST_FAIL,
+                 String("RNOISE=") + rpmNoiseName(rpmData.noise) +
+                 " raw=" + String(rpmData.rawEdges) +
+                 " rej=" + String(rpmData.rejectedEdges) +
+                 " jit=" + String(rpmData.jitterPct, 1) + "%");
+    return;
+  }
+
+  if (name == "kill") {
+    Serial.println("Kill switch cannot be electrically proven from this PCB yet. Use confirmkill after physical NC kill-switch test.");
+    addLog("KILL TEST REQUESTED - use confirmkill after physical test");
+    return;
+  }
+
+  TestId id = TEST_NONE;
+  if (name == "ign") id = TEST_IGN;
+  else if (name == "starter") id = TEST_STARTER;
+  else if (name == "starter_ign" || name == "emi") id = TEST_STARTER_IGN;
+  else if (name == "valve1") id = TEST_VALVE1;
+  else if (name == "valve2") id = TEST_VALVE2;
+  else if (name == "pump") id = TEST_PUMP;
+  else { Serial.println("Unknown test. Use: test egt|rpm_noise|ign|starter|starter_ign|valve1|valve2|pump|kill"); return; }
+
+  if (!requireArmAndIdleForTest(id)) return;
+
+  addLog(String("TEST START ") + checklist[id].name);
+
+  switch (id) {
+    case TEST_IGN:
+      ignCmd = true;
+      applyOutputs();
+      startTimedTest(id, 1000);
+      break;
+    case TEST_STARTER:
+      resetRpmStats();
+      startUs = cfg.starterSpinUs;
+      applyOutputs();
+      startTimedTest(id, 3000);
+      break;
+    case TEST_STARTER_IGN:
+      resetRpmStats();
+      startUs = cfg.starterSpinUs;
+      ignCmd = true;
+      applyOutputs();
+      startTimedTest(id, 3000);
+      break;
+    case TEST_VALVE1:
+      valve1Cmd = true;
+      applyOutputs();
+      startTimedTest(id, 1000);
+      break;
+    case TEST_VALVE2:
+      valve2Cmd = true;
+      applyOutputs();
+      startTimedTest(id, 1000);
+      break;
+    case TEST_PUMP:
+      Serial.println("PUMP PRIME SAFETY: remove engine inlet tube and discharge fuel to container before running.");
+      fuelValvesAuto(true);          // similar to ENJET oil pump test linking main fuel valve
+      pumpUs = cfg.introFuelUs;      // default 1160us ~50 ml/min
+      fuelTargetUs = cfg.introFuelUs;
+      applyOutputs();
+      startTimedTest(id, 1500);
+      break;
+    default:
+      break;
+  }
+}
+
+void updateActiveTest() {
+  if (activeTest == TEST_NONE) return;
+  if (millis() < activeTestEndMs) return;
+
+  TestId done = activeTest;
+  activeTest = TEST_NONE;
+
+  switch (done) {
+    case TEST_IGN:
+      ignCmd = false;
+      applyOutputs();
+      setChecklist(done, TEST_PASS, "IGN pulse completed");
+      break;
+    case TEST_STARTER:
+      startUs = ESC_SAFE_US;
+      applyOutputs();
+      updateRpm();
+      if (rpmMeasurementUsable() && rpmData.rpm >= cfg.starterProveMinRpm)
+        setChecklist(done, TEST_PASS, String("RPM=") + String(rpmData.rpm, 0) + " RNOISE=" + rpmNoiseName(rpmData.noise));
+      else
+        setChecklist(done, TEST_FAIL, String("RPM/RNOISE bad: RPM=") + String(rpmData.rpm, 0) + " RNOISE=" + rpmNoiseName(rpmData.noise));
+      break;
+    case TEST_STARTER_IGN:
+      startUs = ESC_SAFE_US;
+      ignCmd = false;
+      applyOutputs();
+      updateRpm();
+      if (rpmData.noise == RPM_NO_SIGNAL || rpmData.noise == RPM_CLEAN)
+        setChecklist(done, TEST_PASS, String("EMI OK RNOISE=") + rpmNoiseName(rpmData.noise));
+      else
+        setChecklist(done, TEST_FAIL, String("EMI/RPM noisy RNOISE=") + rpmNoiseName(rpmData.noise));
+      break;
+    case TEST_VALVE1:
+      valve1Cmd = false;
+      applyOutputs();
+      setChecklist(done, TEST_PASS, "Valve 1 pulse completed");
+      break;
+    case TEST_VALVE2:
+      valve2Cmd = false;
+      applyOutputs();
+      setChecklist(done, TEST_PASS, "Valve 2 pulse completed");
+      break;
+    case TEST_PUMP:
+      pumpUs = ESC_SAFE_US;
+      fuelTargetUs = ESC_SAFE_US;
+      fuelValvesAuto(false);
+      applyOutputs();
+      setChecklist(done, TEST_PASS, String("Pump prime completed at ") + String(cfg.introFuelUs) + "us");
+      break;
+    default:
+      break;
+  }
+}
+
+String jsonEscape(const String& in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (uint16_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '\\') out += "\\\\";
+    else if (c == '"') out += "\\\"";
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "";
+    else out += c;
+  }
+  return out;
+}
+
+String logsJoined() {
+  String s;
+  for (uint8_t i = 0; i < LOG_COUNT; i++) {
+    uint8_t idx = (eventLogHead + i) % LOG_COUNT;
+    if (eventLog[idx].length()) {
+      if (s.length()) s += "<br>";
+      s += jsonEscape(eventLog[idx]);
+    }
+  }
+  return s;
+}
+
+String checklistJson() {
+  String s = "[";
+  for (int i = 0; i < TEST_COUNT; i++) {
+    if (i) s += ",";
+    s += "{\"name\":\"" + String(checklist[i].name) + "\",\"result\":\"" + String(testResultName(checklist[i].result)) + "\",\"note\":\"" + jsonEscape(checklist[i].note) + "\"}";
+  }
+  s += "]";
+  return s;
+}
+
+String webStatusJson() {
+  updateRpm(); updateEgt();
+  String ckWhy;
+  bool ckOk = checklistPassedForAutoStart(ckWhy);
+  String s = "{";
+  s += "\"mode\":\"" + String(modeName(ecuMode)) + "\",";
+  s += "\"stage\":\"" + String(stageName(startStage)) + "\",";
+  if (egt.ok) s += "\"egt\":\"" + String(egt.c, 1) + " C\",";
+  else s += "\"egt\":\"ERR " + jsonEscape(egtFaultString(egt.fault)) + "\",";
+  s += "\"degt\":\"" + String(egt.gradientCps, 1) + " C/s\",";
+  s += "\"rpm\":\"" + String(rpmData.rpm, 0) + "\",";
+  s += "\"rtgt\":\"" + String(fuelTargetRpm) + "\",";
+  s += "\"rnoise\":\"" + String(rpmNoiseName(rpmData.noise)) + "\",";
+  s += "\"rpmDetail\":\"raw=" + String(rpmData.rawEdges) + " acc=" + String(rpmData.acceptedWindow) + " rej=" + String(rpmData.rejectedEdges) + " jit=" + String(rpmData.jitterPct, 1) + "%" + (rpmData.restPulseNoise ? " REST_GUARD" : "") + "\",";
+  s += "\"pump\":\"" + String(pumpUs) + " us / " + String(flowFromUs(pumpUs), 1) + " ml/min\",";
+  s += "\"ftgt\":\"" + String(fuelTargetUs) + " us / " + String(flowFromUs(fuelTargetUs), 1) + " ml/min\",";
+  s += "\"start\":\"" + String(startUs) + " us\",";
+  s += "\"ign\":\"" + String(ignCmd ? "ON" : "OFF") + "\",";
+  s += "\"v1\":\"" + String(valve1Cmd ? "ON" : "OFF") + "\",";
+  s += "\"v2\":\"" + String(valve2Cmd ? "ON" : "OFF") + "\",";
+  s += "\"thr\":\"" + String(throttlePct) + "%\",";
+  s += "\"arm\":\"" + String(isStage2Armed() ? "ARMED" : "LOCKED") + "\",";
+  s += "\"auto\":\"" + String(cfg.autoStartEnabled ? "ON" : "OFF") + "\",";
+  s += "\"abort\":\"" + jsonEscape(lastAbortReason) + "\",";
+  s += "\"checklistOk\":\"" + String(ckOk ? "PASS" : "BLOCKED") + "\",";
+  s += "\"checklistWhy\":\"" + jsonEscape(ckWhy) + "\",";
+  s += "\"sd\":\"" + String(sdOk ? (cfg.sdLoggingEnabled ? String("OK ") + sdLogPath : "OFF") : "FAIL") + "\",";
+  s += "\"checklist\":" + checklistJson() + ",";
+  s += "\"logs\":\"" + logsJoined() + "\"";
+  s += "}";
+  return s;
+}
+
+String htmlPage() {
+  return String(R"HTML(
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ECU Test V1</title>
+<style>
+body{margin:0;background:#0b1020;color:#e9eefc;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1100px;margin:auto;padding:16px}
+h1{margin:8px 0 4px;font-size:24px}.sub{color:#9fb0d0;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.card{background:#151d33;border:1px solid #283451;border-radius:14px;padding:12px;box-shadow:0 2px 10px #0005}.label{color:#9fb0d0;font-size:12px;text-transform:uppercase}.val{font-size:22px;font-weight:700;margin-top:4px}.warn{color:#ffcc66}.bad{color:#ff7777}.ok{color:#7dffa1}
+.btns{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.btn{border:0;border-radius:10px;padding:10px 12px;background:#293855;color:#fff;font-weight:700}.danger{background:#8a2430}.go{background:#1e7042}.arm{background:#806020}.test{background:#244c80}
+table{width:100%;border-collapse:collapse;margin-top:8px}td,th{border-bottom:1px solid #283451;padding:8px;text-align:left}.small{font-size:12px;color:#9fb0d0}.log{background:#080c18;border-radius:10px;padding:10px;min-height:80px;font-family:monospace;font-size:12px;color:#c7d5ff}
+input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;padding:8px;width:90px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.pill{display:inline-block;border-radius:999px;padding:4px 9px;background:#263752}.pass{background:#145c34}.fail{background:#6a202b}.run{background:#6b551d}
+</style></head><body><div class="wrap">
+<h1>ECU Test V1</h1><div class="sub">SoftAP ECU_TestV1 / admin1234 — http://192.168.4.1</div>
+<div class="grid" id="cards"></div>
+<h2>Controls</h2><div class="btns">
+<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button><button class="btn go" onclick="cmd('autostart on')">AutoStart ON</button><button class="btn go" onclick="cmd('startidle')">START IDLE</button>
+<button class="btn danger" onclick="cmd('stop')">SOFT STOP</button><button class="btn danger" onclick="cmd('off')">SAFE OFF</button><button class="btn" onclick="cmd('rpmreset')">RPM RESET</button><button class="btn" onclick="cmd('set egtstart dry')">EGT Dry</button><button class="btn" onclick="cmd('set egtstart strict')">EGT Strict</button>
+</div>
+<h2>Test Wizard</h2><div class="small">Pump Prime: rút ống nhiên liệu khỏi engine và xả ra bình/ca trước khi test.</div>
+<div class="btns">
+<button class="btn test" onclick="cmd('test egt')">EGT</button><button class="btn test" onclick="cmd('test rpm_noise')">RPM noise</button><button class="btn test" onclick="cmd('test ign')">IGN</button><button class="btn test" onclick="cmd('test starter')">Starter</button><button class="btn test" onclick="cmd('test starter_ign')">Starter+IGN EMI</button><button class="btn test" onclick="cmd('test valve1')">Valve 1</button><button class="btn test" onclick="cmd('test valve2')">Valve 2</button><button class="btn test" onclick="cmd('test pump')">Pump prime</button><button class="btn test" onclick="cmd('confirmkill')">Confirm kill</button><button class="btn" onclick="cmd('resetcheck')">Reset checklist</button>
+</div><table><thead><tr><th>Step</th><th>Result</th><th>Note</th></tr></thead><tbody id="ck"></tbody></table>
+<h2>Tune quick set</h2><div class="row small">
+Idle RPM <input id="idlerpm" value="32000"><button class="btn" onclick="cmd('set idlerpm '+v('idlerpm'))">Set</button>
+Max RPM <input id="maxrpm" value="110000"><button class="btn" onclick="cmd('set maxrpm '+v('maxrpm'))">Set</button>
+Max EGT <input id="maxegt" value="780"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
+Throttle <input id="thr" value="0"><button class="btn" onclick="cmd('set throttle '+v('thr'))">Set</button>
+</div>
+<h2>Event Log</h2><div class="log" id="logs"></div>
+</div><script>
+function v(id){return document.getElementById(id).value}
+function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,200))}
+function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
+function load(){fetch('/api').then(r=>r.json()).then(d=>{let cards=[['MODE',d.mode],['STAGE',d.stage],['EGT',d.egt],['dEGT',d.degt],['RPM',d.rpm],['RPM Target',d.rtgt],['RPM Noise',d.rnoise],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['ARM',d.arm],['Checklist',d.checklistOk],['SD',d.sd],['Abort',d.abort]];
+ document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
+ document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
+ document.getElementById('logs').innerHTML=d.logs||'';});}
+setInterval(load,700);load();
+</script></body></html>
+)HTML");
+}
+
+void setupWebServer() {
+  if (webRoutesReady) return;
+  server.on("/", []() { server.send(200, "text/html", htmlPage()); });
+  server.on("/api", []() { server.send(200, "application/json", webStatusJson()); });
+  server.on("/cmd", []() {
+    String c = server.hasArg("c") ? server.arg("c") : "";
+    if (c.length()) handleCommand(c);
+    server.send(200, "text/plain", "OK");
+  });
+  webRoutesReady = true;
+}
+
+void startWebServer() {
+  cfg.webEnabled = true;
+  setupWebServer();
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(webIp, webGateway, webSubnet);
+  WiFi.softAP(WEB_SSID, WEB_PASS);
+  server.begin();
+  webStarted = true;
+  addLog(String("WEB ON ") + WEB_SSID + " http://192.168.4.1");
+  Serial.print("Web UI: SSID="); Serial.print(WEB_SSID); Serial.println(" PASS=admin1234 URL=http://192.168.4.1");
+}
+
+void stopWebServer() {
+  cfg.webEnabled = false;
+  webStarted = false;
+  WiFi.softAPdisconnect(true);
+  addLog("WEB OFF");
+  Serial.println("Web UI OFF.");
+}
+
+bool canStartAutoIdle(String& why) {
+  updateRpm();
+  updateEgt();
+
+  if (!cfg.autoStartEnabled) { why = "auto-start disabled; use arm2 then autostart on"; return false; }
+  if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { why = "ECU not in WAITING/ABORTED"; return false; }
+
+  bool dry = dryStartRequested();
+  if (cfg.requireEgtForStart && !egt.ok && !dry) {
+    why = "EGT fault / thermocouple not ready";
+    return false;
+  }
+  if (egt.ok && egt.c > (cfg.ignitionThresholdC - 10)) { why = "EGT still too hot for restart"; return false; }
+  if (cfg.maxFuelUs < cfg.idleFuelUs) { why = "maxFuelUs is below idleFuelUs"; return false; }
+  if (cfg.requireRpmForStart && rpmNoiseBlocksStart()) {
+    why = String("RPM_NOT_STABLE_AT_REST: ") + rpmNoiseName(rpmData.noise) +
+          " raw=" + String(rpmData.rawEdges) + " acc=" + String(rpmData.acceptedWindow);
+    return false;
+  }
+  if (cfg.requireChecklistForStart) {
+    String ck;
+    if (!checklistPassedForAutoStart(ck)) {
+      why = String("CHECKLIST_NOT_PASSED: ") + ck;
+      return false;
+    }
+  }
+  if (dry) {
+    why = String("EGT_FAULT_DRY_START_ONLY: ") + egtFaultString(egt.fault);
+  } else {
+    why = "OK";
+  }
+  return true;
+}
+
+void beginAutoIdle() {
+  dryStartActive = dryStartRequested();
+  cooldownAfterAbort = false;
+  throttlePct = 0; lastAbortReason = "NONE"; starterAboveReleaseSinceMs = 0; manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0;
+  fuelTargetUs = ESC_SAFE_US;
+  forceSafeOutputs(); enterMode(MODE_STARTING); enterStage(ST_PURGE);
+  startUs = cfg.starterPurgeUs; pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false); applyOutputs();
+
+  if (dryStartActive) {
+    addLog("DRY START: EGT fault, fuel/valves/ign OFF");
+    Serial.print("DRY START/RPM TEST: EGT fault (");
+    Serial.print(egtFaultString(egt.fault));
+    Serial.println("). PUMP, VALVES and IGN are forced OFF. This will NOT start the engine.");
+  } else {
+    addLog("AUTO-IDLE START");
+    Serial.println("AUTO-IDLE START: entering PURGE");
+  }
+}
+
+void updateDryStarting() {
+  // Dry starter/RPM test used only when EGT is OPEN/faulty.
+  // Fuel, valves and igniter are deliberately forced OFF on every loop.
+  fuelTargetRpm = 0;
+  fuelTargetUs = ESC_SAFE_US;
+  pumpUs = ESC_SAFE_US;
+  ignCmd = false;
+  fuelValvesAuto(false);
+
+  switch (startStage) {
+    case ST_PURGE:
+      startUs = cfg.starterPurgeUs;
+      if (millis() - stageEnteredMs >= cfg.purgeTimeMs) {
+        resetRpmStats();
+        enterStage(ST_SPINUP_PREHEAT);
+        Serial.println("DRY START STAGE -> SPINUP_RPM_TEST");
+      }
+      break;
+
+    case ST_SPINUP_PREHEAT:
+      startUs = cfg.starterSpinUs;
+      if (cfg.requireRpmForStart && millis() - stageEnteredMs > STARTER_PROVE_TIMEOUT_MS &&
+          (!rpmMeasurementUsable() || rpmData.rpm < cfg.starterProveMinRpm)) {
+        abortAll("DRY_NO_STARTER_RPM");
+        return;
+      }
+      if (millis() - stageEnteredMs >= cfg.preheatMs) {
+        enterStage(ST_ACCEL_TO_IDLE);
+        Serial.println("DRY START STAGE -> RUN_STARTER_ASSIST");
+      }
+      break;
+
+    case ST_ACCEL_TO_IDLE:
+      startUs = cfg.starterAssistUs;
+      if (millis() - stageEnteredMs >= cfg.dryStartRunMs) {
+        Serial.print("DRY START COMPLETE -> WAITING. RPM=");
+        Serial.print(rpmData.rpm, 0);
+        Serial.print(" RNOISE=");
+        Serial.println(rpmNoiseName(rpmData.noise));
+        enterWaitingSafe();
+      }
+      break;
+
+    default:
+      abortAll("INVALID_DRY_START_STAGE");
+      return;
+  }
+}
+
+void updateStarting() {
+  if (dryStartActive) {
+    updateDryStarting();
+    return;
+  }
+  switch (startStage) {
+    case ST_PURGE:
+      startUs = cfg.starterPurgeUs; pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false);
+      if (millis() - stageEnteredMs >= cfg.purgeTimeMs) { enterStage(ST_SPINUP_PREHEAT); Serial.println("START STAGE -> SPINUP_PREHEAT"); }
+      break;
+    case ST_SPINUP_PREHEAT:
+      startUs = cfg.starterSpinUs; pumpUs = ESC_SAFE_US; ignCmd = true; fuelValvesAuto(false);
+      if (cfg.requireRpmForStart && millis() - stageEnteredMs > STARTER_PROVE_TIMEOUT_MS && (!rpmMeasurementUsable() || rpmData.rpm < cfg.starterProveMinRpm)) { abortAll("NO_STARTER_RPM"); return; }
+      if (millis() - stageEnteredMs >= cfg.preheatMs) { enterStage(ST_INTRO_FUEL); Serial.println("START STAGE -> INTRO_FUEL"); }
+      break;
+    case ST_INTRO_FUEL:
+      startUs = cfg.starterSpinUs; ignCmd = true; fuelValvesAuto(true); setFuelTargetUs(cfg.introFuelUs); stepPumpToward(fuelTargetUs, cfg.lowAccelStepDelayMs, cfg.lowDecelStepDelayMs);
+      if (egt.ok && egt.c >= cfg.ignitionThresholdC) { enterStage(ST_POST_IGNITION_HEAT); Serial.println("IGNITION DETECTED by EGT threshold."); return; }
+      if (millis() - stageEnteredMs >= cfg.noIgnitionTimeoutMs) { abortAll("NO_IGNITION"); return; }
+      if (cfg.requireRpmForStart && millis() - stageEnteredMs >= cfg.fuelConfirmTimeoutMs && (!rpmMeasurementUsable() || rpmData.rpm < cfg.fuelConfirmRpm)) { abortAll("NO_RPM_RISE"); return; }
+      break;
+    case ST_POST_IGNITION_HEAT:
+      startUs = cfg.starterAssistUs; ignCmd = true; fuelValvesAuto(true); setFuelTargetUs(max(fuelTargetUs, cfg.idleFuelUs)); stepPumpToward(fuelTargetUs, cfg.lowAccelStepDelayMs, cfg.lowDecelStepDelayMs);
+      if (millis() - stageEnteredMs >= cfg.postIgnitionHeatMs) { ignCmd = false; enterStage(ST_ACCEL_TO_IDLE); Serial.println("START STAGE -> ACCEL_TO_IDLE"); }
+      break;
+    case ST_ACCEL_TO_IDLE: {
+      fuelValvesAuto(true); ignCmd = false;
+      if (millis() - stageEnteredMs >= cfg.accelToIdleTimeoutMs) {
+        abortAll("ACCEL_TO_IDLE_TIMEOUT");
+        return;
+      }
+      updateFuelClosedLoopToRpm(cfg.idleRpm, ESC_SAFE_US, cfg.idleFuelUs, true);
+      if (rpmMeasurementUsable() && rpmData.rpm >= cfg.starterReleaseRpm) { if (starterAboveReleaseSinceMs == 0) starterAboveReleaseSinceMs = millis(); } else starterAboveReleaseSinceMs = 0;
+      startUs = (starterAboveReleaseSinceMs > 0 && millis() - starterAboveReleaseSinceMs >= cfg.starterReleaseHoldMs) ? ESC_SAFE_US : cfg.starterAssistUs;
+      if (cfg.requireRpmForStart) {
+        if (rpmMeasurementUsable() && rpmData.rpm >= cfg.idleRpm && millis() - stageEnteredMs >= cfg.idleStabilizeMs) { enterMode(MODE_IDLING); enterStage(ST_NONE); startUs = ESC_SAFE_US; fuelTargetUs = pumpUs; Serial.println("START COMPLETE -> IDLING"); }
+      } else if (millis() - stageEnteredMs >= cfg.idleStabilizeMs + 3000UL) {
+        enterMode(MODE_IDLING); enterStage(ST_NONE); startUs = ESC_SAFE_US; fuelTargetUs = pumpUs; Serial.println("START COMPLETE -> IDLING (no RPM required)");
+      }
+      break;
+    }
+    default: abortAll("INVALID_START_STAGE"); return;
+  }
+}
+
+void updateIdling() {
+  fuelValvesAuto(true); ignCmd = false; startUs = ESC_SAFE_US;
+  updateFuelClosedLoopToRpm(cfg.idleRpm, ESC_SAFE_US, cfg.maxFuelUs, true);
+  if (throttlePct > 0) { enterMode(MODE_OPERATING); fuelTargetUs = pumpUs; Serial.println("IDLING -> OPERATING"); }
+}
+
+void updateOperating() {
+  fuelValvesAuto(true); ignCmd = false; startUs = ESC_SAFE_US;
+  int targetRpm = cfg.idleRpm + (int)lroundf(((float)(cfg.maxRpm - cfg.idleRpm) * (float)throttlePct) / 100.0f);
+  updateFuelClosedLoopToRpm(targetRpm, ESC_SAFE_US, cfg.maxFuelUs, false);
+  if (throttlePct <= 0) { enterMode(MODE_IDLING); fuelTargetUs = pumpUs; Serial.println("OPERATING -> IDLING"); }
+}
+
+void updateCooldown() {
+  // Real cooldown: fuel path and igniter are always OFF, starter gently moves air.
+  // Finish after minimum cooldown AND either EGT is low enough or timeout expires.
+  fuelTargetRpm = 0;
+  fuelTargetUs = ESC_SAFE_US;
+  pumpUs = ESC_SAFE_US;
+  ignCmd = false;
+  fuelValvesAuto(false);
+
+  uint32_t elapsedMs = millis() - modeEnteredMs;
+  bool minDone = elapsedMs >= cfg.cooldownMinMs;
+  bool tempLow = egt.ok && egt.c <= cfg.cooldownTargetC;
+  bool timedOut = elapsedMs >= cfg.cooldownTimeoutMs;
+
+  if (minDone && (tempLow || timedOut)) {
+    startUs = ESC_SAFE_US;
+    fuelTargetUs = ESC_SAFE_US;
+    pumpUs = ESC_SAFE_US;
+    ignCmd = false;
+    fuelValvesAuto(false);
+    applyOutputs();
+
+    if (cooldownAfterAbort) {
+      cooldownAfterAbort = false;
+      enterMode(MODE_ABORTED);
+      enterStage(ST_NONE);
+      Serial.println("COOLDOWN -> ABORTED. Inspect fault, fix cause, then clear only when safe.");
+      addLog("COOLDOWN COMPLETE -> ABORTED");
+    } else {
+      enterWaitingSafe();
+      Serial.println("COOLDOWN -> WAITING");
+    }
+    return;
+  }
+
+  startUs = constrain(cfg.cooldownStarterUs, ESC_SAFE_US, ESC_MAX_US);
+}
+
+void checkFailures() {
+  if (ecuMode == MODE_WAITING || ecuMode == MODE_COOLDOWN || ecuMode == MODE_ABORTED) return;
+  if (!dryStartActive && cfg.abortOnEgtFault && !egt.ok) { abortAll("EGT_FAULT"); return; }
+  if (egt.ok && egt.c >= cfg.maxEgtC) { abortAll("OVER_TEMP"); return; }
+  if (rpmMeasurementUsable() && rpmData.rpm >= cfg.maxRpm) { abortAll("OVERSPEED"); return; }
+  bool fueled = (pumpUs > ESC_SAFE_US + 10) || valve1Cmd || valve2Cmd;
+  if (cfg.abortOnRpmFault && fueled && (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING || startStage == ST_ACCEL_TO_IDLE) && (!rpmMeasurementUsable() || !rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS))) { abortAll("RPM_SIGNAL_LOST"); return; }
+  if ((ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) && fueled && rpmMeasurementUsable() && rpmData.rpm < cfg.flameoutRpm && millis() - modeEnteredMs > 1500UL) { abortAll("FLAMEOUT"); return; }
+}
+
+void printConfig() {
+  Serial.println("===== CONFIG =====");
+  Serial.print("autoStartEnabled="); Serial.println(cfg.autoStartEnabled ? "ON" : "OFF");
+  Serial.print("pulsesPerRev="); Serial.println(cfg.pulsesPerRev);
+  Serial.print("ignitionThresholdC="); Serial.println(cfg.ignitionThresholdC);
+  Serial.print("maxEgtC="); Serial.println(cfg.maxEgtC);
+  Serial.print("idleRpm="); Serial.println(cfg.idleRpm);
+  Serial.print("maxRpm="); Serial.println(cfg.maxRpm);
+  Serial.print("rpmTolerance="); Serial.println(cfg.rpmTolerance);
+  Serial.print("accelToIdleTimeoutMs="); Serial.println(cfg.accelToIdleTimeoutMs);
+  Serial.print("cooldown min/timeout/target/starter="); Serial.print(cfg.cooldownMinMs); Serial.print("ms/"); Serial.print(cfg.cooldownTimeoutMs); Serial.print("ms/"); Serial.print(cfg.cooldownTargetC); Serial.print("C/"); Serial.print(cfg.cooldownStarterUs); Serial.println("us");
+  Serial.print("fuelTargetRpm="); Serial.println(fuelTargetRpm);
+  Serial.print("fuelTargetUs="); Serial.print(fuelTargetUs); Serial.print(" (~"); Serial.print(flowFromUs(fuelTargetUs), 1); Serial.println(" ml/min)");
+  Serial.print("accel/decel ms="); Serial.print(cfg.accelStepDelayMs); Serial.print("/"); Serial.print(cfg.decelStepDelayMs);
+  Serial.print(" low="); Serial.print(cfg.lowAccelStepDelayMs); Serial.print("/"); Serial.println(cfg.lowDecelStepDelayMs);
+  Serial.print("introFuelUs="); Serial.print(cfg.introFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.introFuelUs), 1); Serial.println(" ml/min)");
+  Serial.print("idleFuelUs="); Serial.print(cfg.idleFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.idleFuelUs), 1); Serial.println(" ml/min)");
+  Serial.print("maxFuelUs="); Serial.print(cfg.maxFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.maxFuelUs), 1); Serial.println(" ml/min)");
+  Serial.print("requireChecklistForStart="); Serial.println(cfg.requireChecklistForStart ? "ON" : "OFF");
+  Serial.print("allowDryStartWhenEgtFault="); Serial.println(cfg.allowDryStartWhenEgtFault ? "ON" : "OFF");
+  Serial.print("dryStartRunMs="); Serial.println(cfg.dryStartRunMs);
+  Serial.print("webEnabled="); Serial.println(cfg.webEnabled ? "ON" : "OFF");
+  Serial.print("statusLedGPIO="); Serial.print(PIN_STATUS_LED); Serial.println(STATUS_LED_ACTIVE_LOW ? " active LOW" : " active HIGH");
+  Serial.print("sdLoggingEnabled="); Serial.println(cfg.sdLoggingEnabled ? "ON" : "OFF");
+  Serial.print("sdOk="); Serial.println(sdOk ? "OK" : "FAIL/NOT_INIT");
+  Serial.print("sdLogPath="); Serial.println(sdLogPath);
+  Serial.print("sdPins CS/SCK/MOSI/MISO="); Serial.print(PIN_SD_CS); Serial.print("/"); Serial.print(PIN_SD_SCK); Serial.print("/"); Serial.print(PIN_SD_MOSI); Serial.print("/"); Serial.println(PIN_SD_MISO);
+  Serial.println("==================");
+}
+
+void printHelp() {
+  Serial.println("===== COMMANDS =====");
+  Serial.println("help | status | showcfg | rpmreset | stop | off");
+  Serial.println("rpmdetail             -> print one detailed RPM diagnostic line");
+  Serial.println("rpmdetail on/off      -> show/hide RPM diagnostics in normal status");
+  Serial.println("arm2                  -> unlock dangerous commands for 10 sec");
+  Serial.println("USER_BTN GPIO22       -> short=status, hold 2s=ARM, hold 3s while armed=START, running press=STOP");
+  Serial.println("STATUS_LED GPIO2      -> slow=WAITING, quick=ARMED, solid=START/RUN, fast=ABORT/TEST");
+  Serial.println("autostart on/off      -> enable/disable auto-idle runtime");
+  Serial.println("ignpulse 500..3000    -> glow ON ms then auto OFF");
+  Serial.println("starttest us ms       -> starter test, e.g. starttest 1100 3000");
+  Serial.println("pumptest us [ms]      -> bench pump verify only, auto-off default 1500ms, max 5000ms");
+  Serial.println("valve1 on/off | valve2 on/off");
+  Serial.println("startidle             -> guarded auto-idle start sequence");
+  Serial.println("set egtstart dry|strict | set drystartms <ms>");
+  Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us>");
+  Serial.println("set idlerpm <rpm> | set maxrpm <rpm> | set rpmtol <rpm> | set maxegt <C>");
+  Serial.println("set acceltoidlems <ms> | set cooldownms <minMs> <timeoutMs> | set cooltarget <C> | set coolstarter <us>");
+  Serial.println("set throttle <0..100> | set accelms <ms> | set decelms <ms> | set lowaccelms <ms> | set lowdecelms <ms>");
+  Serial.println("set rpmfilter <20..5000>  -> software glitch filter in us");
+  Serial.println("set rpmedge rising|falling -> RPM interrupt edge");
+  Serial.println("RPM guard: WAITING+outputs OFF + any edge => RPM=0, SIG=REST_NOISE, start blocked");
+  Serial.println("checklist | resetcheck | confirmkill | set checklist on/off");
+  Serial.println("test egt|rpm_noise|ign|starter|starter_ign|valve1|valve2|pump|kill");
+  Serial.println("sdstatus | sdtest | set sdlog on/off");
+  Serial.println("web on | web off");
+}
+
+void printRpmDetail() {
+  Serial.print("RPM_DETAIL=");
+  Serial.print("RPM="); Serial.print(rpmData.rpm, 0);
+  Serial.print(" | RPMw="); Serial.print(rpmData.rpmWindow, 0);
+  Serial.print(" | RPMp="); Serial.print(rpmData.rpmPeriod, 0);
+  Serial.print(" | SIG="); Serial.print(rpmSignalName());
+  Serial.print(" | pin="); Serial.print(rpmData.pinLevel);
+  Serial.print(" | acc="); Serial.print(rpmData.acceptedWindow);
+  Serial.print(" raw="); Serial.print(rpmData.rawEdges);
+  Serial.print(" rej="); Serial.print(rpmData.rejectedEdges);
+  Serial.print(" rej%="); Serial.print(rpmData.rejectPct, 1);
+  Serial.print(" | per="); Serial.print(rpmData.lastPeriodUs); Serial.print("us");
+  Serial.print(" | min="); Serial.print(rpmData.minIntervalUs); Serial.print("us");
+  Serial.print(" | max="); Serial.print(rpmData.maxIntervalUs); Serial.print("us");
+  Serial.print(" | avg="); Serial.print(rpmData.avgIntervalUs, 1); Serial.print("us");
+  Serial.print(" | JIT="); Serial.print(rpmData.jitterPct, 1); Serial.print("%");
+  Serial.print(" | DIFF="); Serial.print(rpmData.rpmDiffPct, 1); Serial.print("%");
+  Serial.print(" | filt="); Serial.print(rpmData.filterUs); Serial.print("us");
+  Serial.print(" | edge="); Serial.print(rpmEdgeName());
+  Serial.print(" | RNOISE="); Serial.print(rpmNoiseName(rpmData.noise));
+  if (rpmData.restPulseNoise) Serial.print(" | REST_GUARD_BLOCK");
+  if (rpmData.rejectedEdges > 0) Serial.print(" | NOISE_FAST");
+  if (rpmData.jitterPct > 30.0f && rpmData.validIntervals > 5) Serial.print(" | RPM_UNSTABLE");
+  Serial.println();
+}
+
+void printStatus(bool force = false) {
+  if (!force && millis() - lastStatusPrintMs < STATUS_PRINT_MS) return;
+  lastStatusPrintMs = millis();
+  Serial.print("MODE="); Serial.print(modeName(ecuMode));
+  Serial.print(" | STAGE="); Serial.print(stageName(startStage));
+  if (dryStartActive) Serial.print(" | DRY=1");
+  Serial.print(" | EGT=");
+  if (egt.ok) { Serial.print(egt.c, 1); Serial.print("C"); } else { Serial.print("ERR("); Serial.print(egtFaultString(egt.fault)); Serial.print(")"); }
+  Serial.print(" | dEGT="); Serial.print(egt.gradientCps, 1);
+  Serial.print(" | RPM="); Serial.print(rpmData.rpm, 0);
+  Serial.print(" | SIG="); Serial.print(rpmSignalName());
+  if (rpmData.noise == RPM_REST_NOISE || rpmData.noise == RPM_NOISY || rpmData.noise == RPM_WARN) {
+    Serial.print(" | RNOISE="); Serial.print(rpmNoiseName(rpmData.noise));
+  }
+
+  if (rpmDetailMode) {
+    Serial.print(" | RPMw="); Serial.print(rpmData.rpmWindow, 0);
+    Serial.print(" | RPMp="); Serial.print(rpmData.rpmPeriod, 0);
+    Serial.print(" | pin="); Serial.print(rpmData.pinLevel);
+    Serial.print(" | acc="); Serial.print(rpmData.acceptedWindow);
+    Serial.print(" raw="); Serial.print(rpmData.rawEdges);
+    Serial.print(" rej="); Serial.print(rpmData.rejectedEdges);
+    Serial.print(" rej%="); Serial.print(rpmData.rejectPct, 1);
+    Serial.print(" | per="); Serial.print(rpmData.lastPeriodUs); Serial.print("us");
+    Serial.print(" | JIT="); Serial.print(rpmData.jitterPct, 1); Serial.print("%");
+    Serial.print(" | DIFF="); Serial.print(rpmData.rpmDiffPct, 1); Serial.print("%");
+    Serial.print(" | filt="); Serial.print(rpmData.filterUs); Serial.print("us");
+    Serial.print(" | edge="); Serial.print(rpmEdgeName());
+    Serial.print(" | RNOISE="); Serial.print(rpmNoiseName(rpmData.noise));
+  }
+
+  Serial.print(" | RTGT="); Serial.print(fuelTargetRpm);
+  Serial.print(" | PUMP="); Serial.print(pumpUs); Serial.print("us ~"); Serial.print(flowFromUs(pumpUs), 1); Serial.print("ml/min");
+  Serial.print(" | FTGT="); Serial.print(fuelTargetUs); Serial.print("us ~"); Serial.print(flowFromUs(fuelTargetUs), 1); Serial.print("ml/min");
+  Serial.print(" | START="); Serial.print(startUs); Serial.print("us");
+  Serial.print(" | IGN="); Serial.print(ignCmd ? 1 : 0);
+  Serial.print(" | V1="); Serial.print(valve1Cmd ? 1 : 0);
+  Serial.print(" | V2="); Serial.print(valve2Cmd ? 1 : 0);
+  Serial.print(" | SD="); Serial.print(sdOk ? (cfg.sdLoggingEnabled ? "OK" : "OFF") : "FAIL");
+  Serial.print(" | THR="); Serial.print(throttlePct); Serial.print("%");
+  Serial.print(" | AUTO="); Serial.print(cfg.autoStartEnabled ? "ON" : "OFF");
+  Serial.print(" | ARM="); Serial.print(isStage2Armed() ? "ON" : "OFF");
+  if (cfg.requireChecklistForStart) { String ck; Serial.print(" | CHECK="); Serial.print(checklistPassed(ck) ? "PASS" : "BLOCK"); }
+  Serial.print(" | ABORT="); Serial.print(lastAbortReason);
+
+  if (rpmDetailMode) {
+    if (rpmData.restPulseNoise) Serial.print(" | REST_GUARD_BLOCK");
+    if (rpmData.rejectedEdges > 0) Serial.print(" | NOISE_FAST");
+    if (rpmData.jitterPct > 30.0f && rpmData.validIntervals > 5) Serial.print(" | RPM_UNSTABLE");
+  }
+
+  Serial.println();
+}
+
+long numberAfter(const String& cmd, const String& prefix) { return cmd.substring(prefix.length()).toInt(); }
+bool parseTwoInts(const String& cmd, int& a, uint32_t& b) {
+  int p1 = cmd.indexOf(' '), p2 = cmd.indexOf(' ', p1 + 1); if (p1 < 0 || p2 < 0) return false;
+  a = cmd.substring(p1 + 1, p2).toInt(); b = (uint32_t)cmd.substring(p2 + 1).toInt(); return true;
+}
+
+void handleCommand(String cmd) {
+  cmd.trim(); cmd.toLowerCase(); if (!cmd.length()) return;
+  if (cmd == "help") { printHelp(); return; }
+  if (cmd == "status") { printStatus(true); return; }
+  if (cmd == "rpmdetail") { updateRpm(); printRpmDetail(); return; }
+  if (cmd == "rpmdetail on") { rpmDetailMode = true; resetRpmStats(); Serial.println("RPM detail mode ON."); return; }
+  if (cmd == "rpmdetail off") { rpmDetailMode = false; Serial.println("RPM detail mode OFF."); return; }
+  if (cmd == "showcfg" || cmd == "cfg") { printConfig(); return; }
+  if (cmd == "sdstatus") { printSdStatus(); return; }
+  if (cmd == "sdtest") { addLog("SDTEST manual event"); Serial.println("SDTEST event written if SD=OK."); return; }
+  if (cmd == "set sdlog on") { cfg.sdLoggingEnabled = true; addLog("SD LOG ON"); Serial.println("SD logging ON"); return; }
+  if (cmd == "set sdlog off") { addLog("SD LOG OFF"); cfg.sdLoggingEnabled = false; Serial.println("SD logging OFF"); return; }
+  if (cmd == "rpmreset") { resetRpmStats(); return; }
+  if (cmd == "checklist") { printChecklist(); return; }
+  if (cmd == "resetcheck") { resetChecklist(); return; }
+  if (cmd == "confirmkill") { setChecklist(TEST_KILL, TEST_PASS, "Physical NC kill switch confirmed by user"); return; }
+  if (cmd.startsWith("test ")) { runTestByName(cmd.substring(5)); return; }
+  if (cmd == "web on") { startWebServer(); return; }
+  if (cmd == "web off") { stopWebServer(); return; }
+  if (cmd == "stop") { requestStop(); return; }
+  if (cmd == "off" || cmd == "stage2off") { stage2Off(); return; }
+  if (cmd == "arm2") { armStage2(); return; }
+  if (cmd == "autostart on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } cfg.autoStartEnabled = true; Serial.println("AUTO-START ENABLED."); return; }
+  if (cmd == "autostart off") { cfg.autoStartEnabled = false; Serial.println("AUTO-START DISABLED."); return; }
+  if (cmd == "startidle") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } String why; if (!canStartAutoIdle(why)) { Serial.print("START BLOCKED: "); Serial.println(why); return; } if (why != "OK") { Serial.print("START NOTICE: "); Serial.println(why); } beginAutoIdle(); return; }
+
+  if (cmd.startsWith("ignpulse ")) {
+    if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; }
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: ignpulse only while WAITING/ABORTED."); return; }
+    uint32_t ms = numberAfter(cmd, "ignpulse "); if (ms < 500 || ms > 3000) { Serial.println("ERROR: ignpulse 500..3000 ms"); return; }
+    ignCmd = true; manualIgnOffAtMs = millis() + ms; applyOutputs(); Serial.print("GLOW ON for "); Serial.print(ms); Serial.println(" ms"); return;
+  }
+
+  if (cmd.startsWith("starttest ")) {
+    if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; }
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: starttest only while WAITING/ABORTED."); return; }
+    int us; uint32_t ms; if (!parseTwoInts(cmd, us, ms)) { Serial.println("ERROR: use starttest <us> <ms>"); return; }
+    if (us < 1000 || us > 1300 || ms < 500 || ms > 10000) { Serial.println("ERROR: us 1000..1300, ms 500..10000"); return; }
+    startUs = us; manualStartOffAtMs = millis() + ms; applyOutputs(); Serial.println("STARTER TEST RUNNING"); return;
+  }
+
+  if (cmd.startsWith("pumptest ")) {
+    if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; }
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: pumptest only while WAITING/ABORTED."); return; }
+
+    String args = cmd.substring(String("pumptest ").length());
+    args.trim();
+    int sp = args.indexOf(' ');
+    int us = (sp < 0) ? args.toInt() : args.substring(0, sp).toInt();
+    uint32_t ms = (sp < 0) ? 1500UL : (uint32_t)args.substring(sp + 1).toInt();
+
+    if (us < 1000 || us > 1175) { Serial.println("ERROR: bench pumptest limited 1000..1175 us"); return; }
+    if (ms < 200 || ms > 5000) { Serial.println("ERROR: pumptest ms 200..5000"); return; }
+
+    pumpUs = us;
+    fuelTargetUs = us;
+    fuelValvesAuto(true);
+    manualPumpOffAtMs = millis() + ms;
+    applyOutputs();
+    Serial.print("PUMP TEST RUNNING ");
+    Serial.print(us);
+    Serial.print("us ~");
+    Serial.print(flowFromUs(us), 1);
+    Serial.print(" ml/min for ");
+    Serial.print(ms);
+    Serial.println(" ms, then AUTO OFF");
+    return;
+  }
+
+  if (cmd == "valve1 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } valve1Cmd = true; applyOutputs(); Serial.println("VALVE1 ON"); return; }
+  if (cmd == "valve1 off") { valve1Cmd = false; applyOutputs(); Serial.println("VALVE1 OFF"); return; }
+  if (cmd == "valve2 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } valve2Cmd = true; applyOutputs(); Serial.println("VALVE2 ON"); return; }
+  if (cmd == "valve2 off") { valve2Cmd = false; applyOutputs(); Serial.println("VALVE2 OFF"); return; }
+
+  if (cmd.startsWith("set rpmfilter ")) {
+    int f = numberAfter(cmd, "set rpmfilter ");
+    if (f < 20 || f > 5000) { Serial.println("ERROR: rpmfilter 20..5000 us"); return; }
+    noInterrupts(); rpmMinPulseUs = (uint32_t)f; interrupts();
+    resetRpmStats();
+    Serial.print("rpmFilterUs="); Serial.println(f);
+    return;
+  }
+
+  if (cmd.startsWith("set rpmedge ")) {
+    String e = cmd.substring(String("set rpmedge ").length());
+    e.trim();
+    if (e == "rising") rpmEdgeMode = RISING;
+    else if (e == "falling") rpmEdgeMode = FALLING;
+    else { Serial.println("ERROR: use set rpmedge rising|falling"); return; }
+    resetRpmStats();
+    attachRpmInterrupt();
+    Serial.print("rpmEdge="); Serial.println(rpmEdgeName());
+    return;
+  }
+
+  if (cmd == "set checklist on") { cfg.requireChecklistForStart = true; Serial.println("Checklist interlock ON"); addLog("CHECKLIST INTERLOCK ON"); return; }
+  if (cmd == "set checklist off") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } cfg.requireChecklistForStart = false; Serial.println("Checklist interlock OFF - DEBUG ONLY"); addLog("CHECKLIST INTERLOCK OFF"); return; }
+  if (cmd == "set egtstart dry") { cfg.allowDryStartWhenEgtFault = true; Serial.println("EGT start mode = DRY: EGT fault converts startidle to dry starter/RPM test, no fuel/valves/ign."); addLog("EGT START MODE DRY"); return; }
+  if (cmd == "set egtstart strict") { cfg.allowDryStartWhenEgtFault = false; Serial.println("EGT start mode = STRICT: EGT fault blocks startidle."); addLog("EGT START MODE STRICT"); return; }
+  if (cmd.startsWith("set drystartms ")) { int v = numberAfter(cmd, "set drystartms "); if (v < 1000 || v > 15000) { Serial.println("ERROR: drystartms 1000..15000"); return; } cfg.dryStartRunMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set ppr ")) { int p = numberAfter(cmd, "set ppr "); if (p != 1 && p != 2) { Serial.println("ERROR: ppr 1 or 2"); return; } cfg.pulsesPerRev = p; Serial.println("OK"); return; }
+  if (cmd.startsWith("set intro ")) { int us = numberAfter(cmd, "set intro "); if (us < 1000 || us > 1250) { Serial.println("ERROR: intro 1000..1250"); return; } cfg.introFuelUs = us; Serial.println("OK"); return; }
+  if (cmd.startsWith("set idleus ")) { int us = numberAfter(cmd, "set idleus "); if (us < 1000 || us > 1270) { Serial.println("ERROR: idleus 1000..1270"); return; } cfg.idleFuelUs = us; if (cfg.maxFuelUs < us) cfg.maxFuelUs = us; Serial.println("OK"); return; }
+  if (cmd.startsWith("set maxus ")) { int us = numberAfter(cmd, "set maxus "); if (us < 1100 || us > 1300) { Serial.println("ERROR: maxus 1100..1300"); return; } cfg.maxFuelUs = max(us, cfg.idleFuelUs); Serial.println("OK"); return; }
+  if (cmd.startsWith("set idlerpm ")) { int r = numberAfter(cmd, "set idlerpm "); if (r < 10000 || r > 60000) { Serial.println("ERROR: idlerpm 10000..60000"); return; } cfg.idleRpm = r; Serial.println("OK"); return; }
+  if (cmd.startsWith("set maxrpm ")) { int r = numberAfter(cmd, "set maxrpm "); if (r < cfg.idleRpm + 5000 || r > 160000) { Serial.println("ERROR: maxrpm must be idleRpm+5000..160000"); return; } cfg.maxRpm = r; Serial.println("OK"); return; }
+  if (cmd.startsWith("set rpmtol ")) { int r = numberAfter(cmd, "set rpmtol "); if (r < 500 || r > 15000) { Serial.println("ERROR: rpmtol 500..15000"); return; } cfg.rpmTolerance = r; Serial.println("OK"); return; }
+  if (cmd.startsWith("set maxegt ")) { int t = numberAfter(cmd, "set maxegt "); if (t < 400 || t > 950) { Serial.println("ERROR: maxegt 400..950"); return; } cfg.maxEgtC = t; Serial.println("OK"); return; }
+  if (cmd.startsWith("set acceltoidlems ")) { int v = numberAfter(cmd, "set acceltoidlems "); if (v < 5000 || v > 60000) { Serial.println("ERROR: acceltoidlems 5000..60000"); return; } cfg.accelToIdleTimeoutMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set cooltarget ")) { int v = numberAfter(cmd, "set cooltarget "); if (v < 50 || v > 250) { Serial.println("ERROR: cooltarget 50..250 C"); return; } cfg.cooldownTargetC = v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set coolstarter ")) { int v = numberAfter(cmd, "set coolstarter "); if (v < 1000 || v > 1200) { Serial.println("ERROR: coolstarter 1000..1200 us"); return; } cfg.cooldownStarterUs = v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set cooldownms ")) { int minMs; uint32_t timeoutMs; if (!parseTwoInts(cmd, minMs, timeoutMs)) { Serial.println("ERROR: use set cooldownms <minMs> <timeoutMs>"); return; } if (minMs < 1000 || minMs > 30000 || timeoutMs < 5000 || timeoutMs > 120000 || timeoutMs < (uint32_t)minMs) { Serial.println("ERROR: minMs 1000..30000, timeoutMs 5000..120000 and >= minMs"); return; } cfg.cooldownMinMs = (uint32_t)minMs; cfg.cooldownTimeoutMs = timeoutMs; Serial.println("OK"); return; }
+  if (cmd.startsWith("set accelms ")) { int v = numberAfter(cmd, "set accelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: accelms 50..2000"); return; } cfg.accelStepDelayMs = v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set decelms ")) { int v = numberAfter(cmd, "set decelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: decelms 50..2000"); return; } cfg.decelStepDelayMs = v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set lowaccelms ")) { int v = numberAfter(cmd, "set lowaccelms "); if (v < 100 || v > 3000) { Serial.println("ERROR: lowaccelms 100..3000"); return; } cfg.lowAccelStepDelayMs = v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set lowdecelms ")) { int v = numberAfter(cmd, "set lowdecelms "); if (v < 100 || v > 3000) { Serial.println("ERROR: lowdecelms 100..3000"); return; } cfg.lowDecelStepDelayMs = v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set throttle ")) { throttlePct = constrain((int)numberAfter(cmd, "set throttle "), 0, 100); Serial.println("OK"); return; }
+
+  Serial.println("Unknown command. Type help");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(400);
+  pinMode(PIN_IGN, OUTPUT); pinMode(PIN_VALVE_1, OUTPUT); pinMode(PIN_VALVE_2, OUTPUT);
+  pinMode(PIN_STATUS_LED, OUTPUT); writeStatusLed(false);
+  pinMode(PIN_USER_BTN, INPUT_PULLUP); // external 10k pull-up is also OK; button shorts to GND
+  pinMode(PIN_RPM, INPUT);
+  attachRpmInterrupt();
+  ESP32PWM::allocateTimer(0); ESP32PWM::allocateTimer(1); ESP32PWM::allocateTimer(2); ESP32PWM::allocateTimer(3);
+  escPump.setPeriodHertz(50); escStart.setPeriodHertz(50);
+  escPump.attach(PIN_ESC_PUMP, ESC_MIN_US, ESC_MAX_US);
+  escStart.attach(PIN_ESC_START, ESC_MIN_US, ESC_MAX_US);
+  forceSafeOutputs();
+  bool thermoOk = thermo.begin();
+  thermo.setFaultChecks(MAX31855_FAULT_ALL);
+  enterWaitingSafe();
+  initSdLogging();
+  addLog("BOOT Test ECU V1 WebUI/TestWizard");
+  Serial.println("Test ECU V1 WebUI/TestWizard booted.");
+  if (cfg.webEnabled) startWebServer();
+  Serial.print("MAX31855 begin() = "); Serial.println(thermoOk ? "OK" : "CHECK_WIRING");
+  Serial.print("RPM edge = "); Serial.println(rpmEdgeName());
+  Serial.print("RPM filter = "); Serial.print((uint32_t)rpmMinPulseUs); Serial.println(" us");
+  Serial.println("RPM detail mode = OFF. Use rpmdetail or rpmdetail on.");
+  Serial.println("USER_BTN GPIO22: short=status, hold 2s=ARM, hold 3s while armed=START, running press=SOFT STOP, aborted hold 2s=CLEAR.");
+  Serial.println("STATUS_LED GPIO2: active-low, slow=WAITING, quick=ARMED, solid=START/RUN, fast=ABORT/TEST.");
+  Serial.print("SD_LOG: "); Serial.print(sdOk ? "OK file=" : "FAIL file="); Serial.println(sdLogPath);
+  Serial.println("EGT OPEN behavior: startidle => DRY START/RPM TEST only, no fuel/valves/ign. Use 'set egtstart strict' to block instead.");
+  Serial.println("Outputs safe. Auto-start disabled. Type help.");
+  delay(2500); // give ESCs safe 1000us pulse
+}
+
+void loop() {
+  if (webStarted) server.handleClient();
+  if (Serial.available()) handleCommand(Serial.readStringUntil('\n'));
+  handleUserButton();
+  if (manualIgnOffAtMs > 0 && millis() >= manualIgnOffAtMs) { ignCmd = false; manualIgnOffAtMs = 0; applyOutputs(); Serial.println("GLOW AUTO OFF."); }
+  if (manualStartOffAtMs > 0 && millis() >= manualStartOffAtMs) { startUs = ESC_SAFE_US; manualStartOffAtMs = 0; applyOutputs(); Serial.println("STARTER AUTO OFF."); }
+  if (manualPumpOffAtMs > 0 && millis() >= manualPumpOffAtMs) { pumpUs = ESC_SAFE_US; fuelTargetUs = ESC_SAFE_US; fuelValvesAuto(false); manualPumpOffAtMs = 0; applyOutputs(); Serial.println("PUMP AUTO OFF."); }
+  updateActiveTest();
+  isStage2Armed();
+  updateRpm(); updateEgt();
+  switch (ecuMode) {
+    case MODE_WAITING: break;
+    case MODE_STARTING: updateStarting(); break;
+    case MODE_IDLING: updateIdling(); break;
+    case MODE_OPERATING: updateOperating(); break;
+    case MODE_COOLDOWN: updateCooldown(); break;
+    case MODE_ABORTED: break;
+    default: abortAll("INVALID_MODE"); break;
+  }
+  checkFailures();
+  applyOutputs();
+  updateStatusLed();
+  updateSdTelemetry();
+  printStatus(false);
+}
