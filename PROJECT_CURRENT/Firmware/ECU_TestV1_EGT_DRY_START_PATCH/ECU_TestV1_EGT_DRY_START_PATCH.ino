@@ -172,6 +172,7 @@ enum StartStage : uint8_t { ST_NONE, ST_PURGE, ST_SPINUP_PREHEAT, ST_INTRO_FUEL,
 EcuMode ecuMode = MODE_WAITING;
 StartStage startStage = ST_NONE;
 uint32_t modeEnteredMs = 0, stageEnteredMs = 0, starterAboveReleaseSinceMs = 0, lastPumpStepMs = 0;
+uint32_t ignitionDetectedMs = 0;  // set when EGT crosses ignition threshold; anchors the post-ignition RPM-rise check
 bool cooldownAfterAbort = false;
 bool stage2Armed = false;
 bool abortAcknowledged = false;  // must be set via clearabort before re-arm from ABORTED
@@ -186,6 +187,8 @@ Adafruit_MAX31855 thermo(PIN_EGT_CLK, PIN_EGT_CS, PIN_EGT_DO);
 void IRAM_ATTR rpmISR();
 bool canStartAutoIdle(String& why);
 bool egtSafeForAbortClear();
+bool egtAllowsDeliberateAbortClear();
+bool fuelCommandBlockedByHotEgt();
 void beginAutoIdle();
 void printStatus(bool force);
 void handleCommand(String cmd);
@@ -207,6 +210,7 @@ void updateStatusLed();
 void initSdLogging();
 void updateSdTelemetry();
 void sdLogEvent(const String& msg);
+void flushSdEventQueue();
 void printSdStatus();
 String webStatusJson();
 String htmlPage();
@@ -281,6 +285,14 @@ bool sdOk = false;
 char sdLogPath[24] = "/ECU000.CSV";
 uint32_t lastSdTelemetryMs = 0;
 uint32_t sdWriteFailCount = 0;
+
+// Deferred SD event queue: event lines are snapshotted at event time but the blocking
+// SD.open()/close() is done from the loop AFTER the safety checks, so a slow card can
+// never delay checkFailures()/applyOutputs() during a fast start sequence.
+static const uint8_t SD_EVENT_QUEUE = 8;
+String sdEventQueue[SD_EVENT_QUEUE];
+uint8_t sdEventQHead = 0, sdEventQTail = 0;
+uint32_t sdEventDropCount = 0;
 
 // ===== Event log =====
 static const uint8_t LOG_COUNT = 16;
@@ -487,10 +499,9 @@ bool isStage2Armed() {
 }
 void armStage2() { stage2Armed = true; stage2ArmUntilMs = millis() + STAGE2_ARM_TIME_MS; addLog("ARMED 10s"); Serial.println("WARNING: STAGE2 ARMED FOR 10 SECONDS"); }
 void stage2Off() {
-  if (ecuMode == MODE_ABORTED && !egtSafeForAbortClear()) {
+  if (ecuMode == MODE_ABORTED && !egtAllowsDeliberateAbortClear()) {
     Serial.print("SAFE OFF BLOCKED: EGT still hot (");
-    if (egt.ok) { Serial.print(egt.c, 1); Serial.print("C"); }
-    else { Serial.print(egtFaultString(egt.fault)); }
+    Serial.print(egt.c, 1); Serial.print("C");
     Serial.println("). Wait to cool or use physical button.");
     return;
   }
@@ -499,8 +510,28 @@ void stage2Off() {
 
 
 bool egtSafeForAbortClear() {
-  // Clear ABORT only when thermocouple is valid and below restart threshold.
+  // Automatic / remote clear: allowed only when the thermocouple is valid AND cool.
   return egt.ok && egt.c <= (cfg.ignitionThresholdC - 10);
+}
+
+bool egtAllowsDeliberateAbortClear() {
+  // Deliberate operator clear (physical button hold, or "clearabort force"):
+  // if the thermocouple is readable it must be cool, but if the sensor is dead we
+  // cannot read temperature at all. Blocking on egt.ok would trap the ECU in
+  // ABORTED forever when the thermocouple breaks, so we trust the physically
+  // present operator here. A subsequent start is still forced into dry-start mode
+  // (starter only, fuel/ignition OFF) while egt.ok is false, so this cannot open
+  // fuel into a hot engine.
+  if (!egt.ok) return true;
+  return egt.c <= (cfg.ignitionThresholdC - 10);
+}
+
+bool fuelCommandBlockedByHotEgt() {
+  // Refuse to open fuel into a demonstrably hot engine, e.g. a bench pump test issued
+  // right after an OVER_TEMP abort while the engine is still above cooldown target.
+  // If the sensor is unreadable we cannot verify temperature; the pump test is a
+  // bench-only procedure with its own operator warning, so it is allowed in that case.
+  return egt.ok && egt.c > cfg.cooldownTargetC;
 }
 
 void startIdleFromButton() {
@@ -599,21 +630,16 @@ void handleUserButton() {
   if (ecuMode == MODE_ABORTED) {
     if (heldMs >= BTN_CLEAR_ABORT_HOLD_MS) {
       btnActionDone = true;
-      if (egtSafeForAbortClear()) {
+      if (egtAllowsDeliberateAbortClear()) {
         lastAbortReason = "CLEARED_BY_BUTTON";
         abortAcknowledged = true;
+        if (!egt.ok) Serial.println("USER_BTN: WARNING EGT sensor faulty - temperature not verified. Next start will be DRY only.");
         enterWaitingSafe();
         Serial.println("USER_BTN: ABORT cleared, ECU -> WAITING.");
       } else {
-        Serial.print("USER_BTN CLEAR BLOCKED: EGT not safe. EGT=");
-        if (egt.ok) {
-          Serial.print(egt.c, 1);
-          Serial.println("C");
-        } else {
-          Serial.print("ERR(");
-          Serial.print(egtFaultString(egt.fault));
-          Serial.println(")");
-        }
+        Serial.print("USER_BTN CLEAR BLOCKED: EGT still hot. EGT=");
+        Serial.print(egt.c, 1);
+        Serial.println("C");
       }
     }
   }
@@ -760,6 +786,9 @@ void IRAM_ATTR rpmISR() {
   uint32_t dtRawUs = nowUs - isrLastRawEdgeUs;
   isrLastRawEdgeUs = nowUs;
 
+  // (1) Fixed min-pulse (quiet-period) de-glitch: an edge must be preceded by at
+  //     least filterUs of silence since the previous RAW edge. This fully rejects
+  //     dense EMI bursts (edges spaced closer than filterUs).
   uint32_t filterUs = rpmMinPulseUs;
   if (dtRawUs < filterUs) {
     isrRejectedEdges++;
@@ -768,6 +797,18 @@ void IRAM_ATTR rpmISR() {
 
   if (isrLastAcceptedPulseUs != 0) {
     uint32_t dtAcceptedUs = nowUs - isrLastAcceptedPulseUs;
+    // (2) Adaptive mask: once a valid period is known, also reject any edge that
+    //     arrives within half of the last accepted period. A turbine cannot double
+    //     its speed within a single revolution, so genuine acceleration pulses are
+    //     preserved, while an isolated EMI spike that lands after a quiet gap (and
+    //     would otherwise pass the fixed filter) is rejected instead of being
+    //     counted as a phantom high-RPM pulse.
+    uint32_t maskUs = filterUs;
+    if (isrLastPeriodUs > 0 && (isrLastPeriodUs >> 1) > maskUs) maskUs = (isrLastPeriodUs >> 1);
+    if (dtAcceptedUs < maskUs) {
+      isrRejectedEdges++;
+      return;
+    }
     isrLastPeriodUs = dtAcceptedUs;
     isrAcceptedIntervals++;
     isrSumDtUs += dtAcceptedUs;
@@ -800,11 +841,6 @@ void updateRpm() {
   uint32_t nowMs = millis();
   if (nowMs - rpmData.lastComputedMs < RPM_SAMPLE_MS) return;
 
-  uint32_t nowUs = micros();
-  uint32_t windowUs = (rpmData.lastComputedUs == 0) ? (RPM_SAMPLE_MS * 1000UL) : (nowUs - rpmData.lastComputedUs);
-  rpmData.lastComputedUs = nowUs;
-  rpmData.lastComputedMs = nowMs;
-
   uint32_t accepted, raw, rejected, validN, minDt, maxDt, lastPulseUs, lastPeriodUs, filterUs;
   uint64_t sumDt;
 
@@ -828,6 +864,15 @@ void updateRpm() {
   isrMinDtUs = 0xFFFFFFFFUL;
   isrMaxDtUs = 0;
   interrupts();
+
+  // Sample the clock AFTER the critical section. lastPulseUs was written by an ISR
+  // that has already run, so a nowUs taken here is always >= lastPulseUs. This
+  // prevents a uint32_t wraparound in the signalRecent computation below when the
+  // ISR fires between capturing the time and entering the critical section.
+  uint32_t nowUs = micros();
+  uint32_t windowUs = (rpmData.lastComputedUs == 0) ? (RPM_SAMPLE_MS * 1000UL) : (nowUs - rpmData.lastComputedUs);
+  rpmData.lastComputedUs = nowUs;
+  rpmData.lastComputedMs = nowMs;
 
   rpmData.acceptedWindow = accepted;
   rpmData.rawEdges = raw;
@@ -961,7 +1006,25 @@ void sdAppendLine(const String& line) {
 }
 
 void sdLogEvent(const String& msg) {
-  sdAppendLine(sdCsvLine("EVENT", msg));
+  if (!sdOk || !cfg.sdLoggingEnabled) return;
+  // Snapshot the CSV line now (captures EGT/RPM/outputs at event time) but defer the
+  // blocking write. flushSdEventQueue() runs later in loop(), after the safety checks.
+  uint8_t next = (sdEventQHead + 1) % SD_EVENT_QUEUE;
+  if (next == sdEventQTail) {
+    // Queue full: drop the oldest to keep the most recent events.
+    sdEventQTail = (sdEventQTail + 1) % SD_EVENT_QUEUE;
+    sdEventDropCount++;
+  }
+  sdEventQueue[sdEventQHead] = sdCsvLine("EVENT", msg);
+  sdEventQHead = next;
+}
+
+void flushSdEventQueue() {
+  while (sdEventQTail != sdEventQHead) {
+    sdAppendLine(sdEventQueue[sdEventQTail]);
+    sdEventQueue[sdEventQTail] = "";  // release the String buffer
+    sdEventQTail = (sdEventQTail + 1) % SD_EVENT_QUEUE;
+  }
 }
 
 void updateSdTelemetry() {
@@ -1205,6 +1268,13 @@ void runTestByName(const String& nameIn) {
       startTimedTest(id, 1000);
       break;
     case TEST_PUMP:
+      if (fuelCommandBlockedByHotEgt()) {
+        Serial.print("PUMP TEST BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
+        Serial.print("C > cooldown target "); Serial.print(cfg.cooldownTargetC); Serial.println("C).");
+        setChecklist(TEST_PUMP, TEST_FAIL, "Blocked: EGT too hot");
+        activeTest = TEST_NONE;
+        break;
+      }
       Serial.println("PUMP PRIME SAFETY: remove engine inlet tube and discharge fuel to container before running.");
       fuelValvesAuto(true);          // similar to ENJET oil pump test linking main fuel valve
       pumpUs = cfg.introFuelUs;      // default 1160us ~50 ml/min
@@ -1311,7 +1381,9 @@ String webStatusJson() {
   updateRpm(); updateEgt();
   String ckWhy;
   bool ckOk = checklistPassedForAutoStart(ckWhy);
-  String s = "{";
+  String s;
+  s.reserve(896);   // pre-size to avoid repeated heap reallocations on each /api poll
+  s = "{";
   s += "\"mode\":\"" + String(modeName(ecuMode)) + "\",";
   s += "\"stage\":\"" + String(stageName(startStage)) + "\",";
   if (egt.ok) s += "\"egt\":\"" + String(egt.c, 1) + " C\",";
@@ -1455,6 +1527,10 @@ bool canStartAutoIdle(String& why) {
 void beginAutoIdle() {
   dryStartActive = dryStartRequested();
   cooldownAfterAbort = false;
+  // Cancel any component test still counting down so updateActiveTest() cannot fire
+  // mid-sequence and stall the starter or valves during the real start.
+  activeTest = TEST_NONE; activeTestEndMs = 0;
+  ignitionDetectedMs = 0;
   throttlePct = 0; lastAbortReason = "NONE"; starterAboveReleaseSinceMs = 0; manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0;
   fuelTargetUs = ESC_SAFE_US;
   forceSafeOutputs(); enterMode(MODE_STARTING); enterStage(ST_PURGE);
@@ -1520,6 +1596,19 @@ void updateDryStarting() {
   }
 }
 
+bool checkPostIgnitionRpmRise() {
+  // After light-off, RPM must climb past fuelConfirmRpm within fuelConfirmTimeoutMs.
+  // Anchored on ignitionDetectedMs so it spans POST_IGNITION_HEAT and ACCEL_TO_IDLE,
+  // instead of living inside ST_INTRO_FUEL where the shorter NO_IGNITION timeout
+  // always fired first and made it dead code. Returns true after aborting.
+  if (!cfg.requireRpmForStart) return false;
+  if (ignitionDetectedMs == 0) return false;
+  if (millis() - ignitionDetectedMs < cfg.fuelConfirmTimeoutMs) return false;
+  if (rpmMeasurementUsable() && rpmData.rpm >= cfg.fuelConfirmRpm) return false;
+  abortAll("NO_RPM_RISE");
+  return true;
+}
+
 void updateStarting() {
   if (dryStartActive) {
     updateDryStarting();
@@ -1537,16 +1626,17 @@ void updateStarting() {
       break;
     case ST_INTRO_FUEL:
       startUs = cfg.starterSpinUs; ignCmd = true; fuelValvesAuto(true); setFuelTargetUs(cfg.introFuelUs); stepPumpToward(fuelTargetUs, cfg.lowAccelStepDelayMs, cfg.lowDecelStepDelayMs);
-      if (egt.ok && egt.c >= cfg.ignitionThresholdC) { enterStage(ST_POST_IGNITION_HEAT); Serial.println("IGNITION DETECTED by EGT threshold."); return; }
+      if (egt.ok && egt.c >= cfg.ignitionThresholdC) { ignitionDetectedMs = millis(); enterStage(ST_POST_IGNITION_HEAT); Serial.println("IGNITION DETECTED by EGT threshold."); return; }
       if (millis() - stageEnteredMs >= cfg.noIgnitionTimeoutMs) { abortAll("NO_IGNITION"); return; }
-      if (cfg.requireRpmForStart && millis() - stageEnteredMs >= cfg.fuelConfirmTimeoutMs && (!rpmMeasurementUsable() || rpmData.rpm < cfg.fuelConfirmRpm)) { abortAll("NO_RPM_RISE"); return; }
       break;
     case ST_POST_IGNITION_HEAT:
       startUs = cfg.starterAssistUs; ignCmd = true; fuelValvesAuto(true); setFuelTargetUs(max(fuelTargetUs, cfg.idleFuelUs)); stepPumpToward(fuelTargetUs, cfg.lowAccelStepDelayMs, cfg.lowDecelStepDelayMs);
+      if (checkPostIgnitionRpmRise()) return;
       if (millis() - stageEnteredMs >= cfg.postIgnitionHeatMs) { ignCmd = false; enterStage(ST_ACCEL_TO_IDLE); Serial.println("START STAGE -> ACCEL_TO_IDLE"); }
       break;
     case ST_ACCEL_TO_IDLE: {
       fuelValvesAuto(true); ignCmd = false;
+      if (checkPostIgnitionRpmRise()) return;
       if (millis() - stageEnteredMs >= cfg.accelToIdleTimeoutMs) {
         abortAll("ACCEL_TO_IDLE_TIMEOUT");
         return;
@@ -1622,7 +1712,12 @@ void checkFailures() {
   if (egt.ok && egt.c >= cfg.maxEgtC) { abortAll("OVER_TEMP"); return; }
   if (rpmMeasurementUsable() && rpmData.rpm >= cfg.maxRpm) { abortAll("OVERSPEED"); return; }
   bool fueled = (pumpUs > ESC_SAFE_US + 10) || valve1Cmd || valve2Cmd;
-  if (cfg.abortOnRpmFault && fueled && (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING || startStage == ST_ACCEL_TO_IDLE) && (!rpmMeasurementUsable() || !rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS))) { abortAll("RPM_SIGNAL_LOST"); return; }
+  // Any fueled state must have a live RPM signal. Covering the whole MODE_STARTING
+  // (not just ST_ACCEL_TO_IDLE) closes the gap in ST_INTRO_FUEL / ST_POST_IGNITION_HEAT,
+  // where fuel valves are already open: without this, a broken RPM wire would leave
+  // fuel flowing until the NO_IGNITION timeout. Non-fueled early stages (PURGE,
+  // SPINUP) keep fueled=false so they are not affected.
+  if (cfg.abortOnRpmFault && fueled && (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING || ecuMode == MODE_STARTING) && (!rpmMeasurementUsable() || !rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS))) { abortAll("RPM_SIGNAL_LOST"); return; }
   if ((ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) && fueled && rpmMeasurementUsable() && rpmData.rpm < cfg.flameoutRpm && millis() - modeEnteredMs > 1500UL) { abortAll("FLAMEOUT"); return; }
 }
 
@@ -1659,6 +1754,8 @@ void printConfig() {
 void printHelp() {
   Serial.println("===== COMMANDS =====");
   Serial.println("help | status | showcfg | rpmreset | stop | off");
+  Serial.println("clearabort            -> acknowledge abort (needs cool EGT)");
+  Serial.println("clearabort force      -> acknowledge abort when EGT sensor is dead (dry-start only after)");
   Serial.println("rpmdetail             -> print one detailed RPM diagnostic line");
   Serial.println("rpmdetail on/off      -> show/hide RPM diagnostics in normal status");
   Serial.println("arm2                  -> unlock dangerous commands for 10 sec");
@@ -1791,15 +1888,21 @@ void handleCommand(String cmd) {
   if (cmd == "web off") { stopWebServer(); return; }
   if (cmd == "stop") { requestStop(); return; }
   if (cmd == "off" || cmd == "stage2off") { stage2Off(); return; }
-  if (cmd == "clearabort") {
+  if (cmd == "clearabort" || cmd == "clearabort force") {
     if (ecuMode != MODE_ABORTED && ecuMode != MODE_WAITING) { Serial.println("ERROR: clearabort only valid in ABORTED/WAITING mode."); return; }
-    if (!egtSafeForAbortClear()) {
-      Serial.print("CLEARABORT BLOCKED: EGT still hot (");
-      if (egt.ok) { Serial.print(egt.c, 1); Serial.print("C"); } else { Serial.print(egtFaultString(egt.fault)); }
-      Serial.println("). Wait for engine to cool.");
+    bool force = (cmd == "clearabort force");
+    // Plain clearabort needs a valid, cool thermocouple. "clearabort force" also
+    // works when the sensor is dead (egt.ok=false) so a broken thermocouple can
+    // never trap the ECU in ABORTED; it still refuses when EGT is readable and hot.
+    bool allowed = force ? egtAllowsDeliberateAbortClear() : egtSafeForAbortClear();
+    if (!allowed) {
+      Serial.print("CLEARABORT BLOCKED: ");
+      if (egt.ok) { Serial.print("EGT still hot ("); Serial.print(egt.c, 1); Serial.println("C). Wait for engine to cool."); }
+      else { Serial.print("EGT sensor fault ("); Serial.print(egtFaultString(egt.fault)); Serial.println("). Verify engine is cool, then use: clearabort force"); }
       return;
     }
     abortAcknowledged = true;
+    if (force && !egt.ok) Serial.println("WARNING: EGT sensor faulty - temperature NOT verified. Next start will be DRY only (fuel/ignition OFF).");
     Serial.print("ABORT acknowledged (was: "); Serial.print(lastAbortReason); Serial.println("). ECU ready to arm.");
     return;
   }
@@ -1835,6 +1938,12 @@ void handleCommand(String cmd) {
 
     if (us < 1000 || us > 1175) { Serial.println("ERROR: bench pumptest limited 1000..1175 us"); return; }
     if (ms < 200 || ms > 5000) { Serial.println("ERROR: pumptest ms 200..5000"); return; }
+    if (fuelCommandBlockedByHotEgt()) {
+      Serial.print("PUMPTEST BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
+      Serial.print("C > cooldown target "); Serial.print(cfg.cooldownTargetC);
+      Serial.println("C). Let it cool before spraying fuel.");
+      return;
+    }
 
     pumpUs = us;
     fuelTargetUs = us;
@@ -1965,5 +2074,6 @@ void loop() {
   applyOutputs();
   updateStatusLed();
   updateSdTelemetry();
+  flushSdEventQueue();   // blocking SD writes happen here, after the safety checks
   printStatus(false);
 }
