@@ -195,6 +195,44 @@ MAX31855/WiFi/WebServer/SD, không warning).
 
 ---
 
+# 🔧 Cập nhật vai trò Valve1/Valve2 (2026-07-16) — theo manual EnJet E86/G3
+
+Đối chiếu `REFERENCES/Documentation/Engine_Manual_NewerModel.pdf` (EnJet G3
+Series manual, có bảng thông số E86) xác nhận động cơ dùng **2 valve dầu**
+(không phải gas): **Start solenoid valve** (mạch dầu khởi động riêng) +
+**Main oil valve** (mạch dầu chính, luôn mở khi bơm chạy — theo mô tả
+"Oil Pump Test" tự động liên kết mở Main valve trong manual).
+
+Trước đây `fuelValvesAuto()` mở/đóng cả 2 valve đồng thời, không phân biệt
+vai trò. Đã cập nhật:
+
+```cpp
+void fuelValvesAuto(bool on) {
+  valve2Cmd = on;                              // Main: mở bất cứ khi nào có lệnh nhiên liệu
+  valve1Cmd = on && (ecuMode == MODE_STARTING); // Start: chỉ mở trong lúc MODE_STARTING
+}
+```
+
+- **VALVE1 (Start)** chỉ mở trong `ST_INTRO_FUEL → ST_POST_IGNITION_HEAT →
+  ST_ACCEL_TO_IDLE` (toàn bộ `MODE_STARTING`), tự động đóng ngay khi chuyển
+  sang `MODE_IDLING`.
+- **VALVE2 (Main)** giữ hành vi cũ — mở bất cứ khi nào `fuelValvesAuto(true)`
+  được gọi, bất kể mode (khớp `pumptest`/Test Wizard pump-prime = "Oil Pump
+  Test" của Enjet, chỉ mở Main).
+- Checklist đổi tên hiển thị `VALVE_1`→`VALVE1_START`, `VALVE_2`→`VALVE2_MAIN`
+  để rõ vai trò trên Serial/Web UI.
+- Đã rà soát toàn bộ điểm gọi `valve1Cmd`/`valve2Cmd` (rest-guard, fueled
+  check trong `checkFailures()`, log) — không có điểm nào phụ thuộc hành vi
+  "2 valve luôn giống nhau" nên không có tác dụng phụ.
+
+**Lưu ý còn để ngỏ**: giả định trên dựa vào tài liệu chính hãng, chưa xác
+nhận vật lý E86 đời cũ của người dùng có đúng 2 mạch dầu tách biệt hay
+không — nên đối chiếu lại đường ống thật trước khi test có nhiên liệu.
+
+**Verify**: compile sạch (`g++ -fsyntax-only -Wall -Wextra`, không warning).
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-16 (vòng 3)
+**Lần cập nhật**: 2026-07-16 (vòng 3 + valve role update)

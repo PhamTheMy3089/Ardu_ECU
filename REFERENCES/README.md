@@ -11,6 +11,8 @@
 ```
 REFERENCES/
 ├── Documentation/          ← Hướng dẫn và tài liệu tham khảo
+│   ├── Engine_Manual_NewerModel.pdf         ← EnJet G3 Series manual (English, có bảng thông số E86)
+│   ├── Engine_Manual_NewerModel_Chinese.pdf ← EnJet G3 系列使用手册 (tiếng Trung, bản gốc)
 │   └── Manuals/
 │       ├── Rev 9-10 ECU_Manual.md
 │       └── ECU Rev11 Guide.pdf
@@ -138,6 +140,16 @@ Web UI               |  ✗   |  ⚠️   |  ✓    |  ✓    |  ✓
 
 - **Rev 9-10 ECU_Manual.md** → Describes features for Rev 9 and 10
 - **ECU Rev11 Guide.pdf** → Detailed guide for Rev 11 firmware
+- **Engine_Manual_NewerModel.pdf** → EnJet G3 Series user manual (English).
+  Contains the official engine spec table (incl. E86: 42,000-152,000 RPM,
+  600-750°C EGT, 340 ml/min max fuel), PCU component test descriptions
+  (Start solenoid valve vs Main oil valve), and fault codes. Used as the
+  basis for `PROJECT_CURRENT`'s valve1/valve2 role split — see
+  `PROJECT_CURRENT/Docs/CODE_REVIEW_FINDINGS.md`.
+- **Engine_Manual_NewerModel_Chinese.pdf** → Same EnJet G3 manual, original
+  Chinese text (ENJET G3 系列使用手册 V1.2). Cross-checked against the
+  English version for the valve/component-test terminology (启动阀 = Start
+  valve, 主油阀 = Main oil valve).
 
 **Note**: These are old and may not reflect current implementation.
 

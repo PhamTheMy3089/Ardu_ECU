@@ -2,6 +2,12 @@
   ESP32 Test ECU V1 - Serial Preview Firmware
   Pins: MAX31855 CLK=18 CS=5 DO=19, RPM=33, PUMP=26, START=25,
         VALVE1=17, VALVE2=16, IGN/GLOW=32.
+  Valve roles (per EnJet E86/G3 manual "Component Test" section):
+    VALVE1 = Start solenoid valve (start oil circuit) - open only while
+             MODE_STARTING (ignition dosing through accel-to-idle), closes
+             automatically once the engine reaches MODE_IDLING.
+    VALVE2 = Main oil valve (main oil circuit) - open whenever fuel is
+             commanded, same as a standalone bench "Oil Pump Test".
   Web UI + Serial Monitor. Auto-start is disabled at boot.
   User button: GPIO22 active-low, short press=status/log, hold=ARM/START/CLEAR, running press=soft stop.
   Status LED: onboard GPIO2 active-low.
@@ -47,8 +53,8 @@
 #define PIN_RPM        33
 #define PIN_ESC_PUMP   26
 #define PIN_ESC_START  25
-#define PIN_VALVE_1    17
-#define PIN_VALVE_2    16
+#define PIN_VALVE_1    17   // Start solenoid valve (start oil circuit) - MODE_STARTING only
+#define PIN_VALVE_2    16   // Main oil valve (main oil circuit) - open whenever fuel is commanded
 #define PIN_IGN        32
 #define PIN_USER_BTN   22   // USER/ARM/START/SOFT-STOP button, active LOW
 #define PIN_STATUS_LED  2    // onboard NodeMCU-32S LED, active LOW on tested board
@@ -59,8 +65,6 @@
 
 static const bool IGN_ACTIVE_HIGH = true;
 static const bool VALVE_ACTIVE_HIGH = true;
-static const bool AUTO_OPEN_V1_WITH_FUEL = true;
-static const bool AUTO_OPEN_V2_WITH_FUEL = true;
 
 static const int ESC_SAFE_US = 1000;
 static const int ESC_MIN_US  = 1000;
@@ -337,8 +341,8 @@ ChecklistItem checklist[TEST_COUNT] = {
   {"IGN_PULSE", TEST_NOT_RUN, "Not run", 0},
   {"STARTER", TEST_NOT_RUN, "Not run", 0},
   {"STARTER_IGN_EMI", TEST_NOT_RUN, "Not run", 0},
-  {"VALVE_1", TEST_NOT_RUN, "Not run", 0},
-  {"VALVE_2", TEST_NOT_RUN, "Not run", 0},
+  {"VALVE1_START", TEST_NOT_RUN, "Not run", 0},
+  {"VALVE2_MAIN", TEST_NOT_RUN, "Not run", 0},
   {"PUMP_PRIME", TEST_NOT_RUN, "Not run", 0},
   {"KILL_SWITCH", TEST_NOT_RUN, "Not confirmed", 0}
 };
@@ -453,7 +457,17 @@ void applyOutputs() {
   writeActiveDigital(PIN_VALVE_2, valve2Cmd, VALVE_ACTIVE_HIGH);
 }
 
-void fuelValvesAuto(bool on) { valve1Cmd = on && AUTO_OPEN_V1_WITH_FUEL; valve2Cmd = on && AUTO_OPEN_V2_WITH_FUEL; }
+void fuelValvesAuto(bool on) {
+  // VALVE2 (Main oil valve): open whenever fuel is commanded, matching the
+  // EnJet manual's "Oil Pump Test" behavior (linked to the main oil circuit
+  // regardless of engine mode).
+  valve2Cmd = on;
+  // VALVE1 (Start solenoid valve): only feeds the start oil circuit during
+  // the ignition/accel-to-idle sequence. Closes automatically the instant
+  // ecuMode leaves MODE_STARTING (e.g. the moment IDLING is entered), so the
+  // main circuit alone carries fuel for the rest of IDLING/OPERATING.
+  valve1Cmd = on && (ecuMode == MODE_STARTING);
+}
 void forceSafeOutputs() { fuelTargetRpm = 0; fuelTargetUs = ESC_SAFE_US; pumpUs = ESC_SAFE_US; startUs = ESC_SAFE_US; ignCmd = valve1Cmd = valve2Cmd = false; applyOutputs(); }
 void enterMode(EcuMode m) {
   if (ecuMode != m) addLog(String("MODE -> ") + modeName(m));
@@ -1784,7 +1798,7 @@ void printHelp() {
   Serial.println("ignpulse 500..3000    -> glow ON ms then auto OFF");
   Serial.println("starttest us ms       -> starter test, e.g. starttest 1100 3000");
   Serial.println("pumptest us [ms]      -> bench pump verify only, auto-off default 1500ms, max 5000ms");
-  Serial.println("valve1 on/off | valve2 on/off");
+  Serial.println("valve1 on/off (Start solenoid, bench-only) | valve2 on/off (Main oil valve, bench-only)");
   Serial.println("startidle             -> guarded auto-idle start sequence");
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
   Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us>");
