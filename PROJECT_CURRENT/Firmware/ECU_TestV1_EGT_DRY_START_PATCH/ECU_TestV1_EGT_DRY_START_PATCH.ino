@@ -250,6 +250,7 @@ volatile uint32_t isrAcceptedIntervals = 0;
 volatile uint32_t isrMinDtUs = 0xFFFFFFFFUL;
 volatile uint32_t isrMaxDtUs = 0;
 volatile uint64_t isrSumDtUs = 0;
+volatile uint64_t isrSumDtSqUs = 0;  // sum of dt^2, used for stddev-based jitter (not swayed by a single outlier)
 
 enum RpmNoiseLevel : uint8_t { RPM_CLEAN, RPM_WARN, RPM_NOISY, RPM_REST_NOISE, RPM_NO_SIGNAL };
 
@@ -838,6 +839,7 @@ void IRAM_ATTR rpmISR() {
     isrLastPeriodUs = dtAcceptedUs;
     isrAcceptedIntervals++;
     isrSumDtUs += dtAcceptedUs;
+    isrSumDtSqUs += (uint64_t)dtAcceptedUs * (uint64_t)dtAcceptedUs;
     if (dtAcceptedUs < isrMinDtUs) isrMinDtUs = dtAcceptedUs;
     if (dtAcceptedUs > isrMaxDtUs) isrMaxDtUs = dtAcceptedUs;
   }
@@ -856,6 +858,7 @@ void resetRpmStats() {
   isrRejectedEdges = 0;
   isrAcceptedIntervals = 0;
   isrSumDtUs = 0;
+  isrSumDtSqUs = 0;
   isrMinDtUs = 0xFFFFFFFFUL;
   isrMaxDtUs = 0;
   interrupts();
@@ -868,7 +871,7 @@ void updateRpm() {
   if (nowMs - rpmData.lastComputedMs < RPM_SAMPLE_MS) return;
 
   uint32_t accepted, raw, rejected, validN, minDt, maxDt, lastPulseUs, lastPeriodUs, filterUs;
-  uint64_t sumDt;
+  uint64_t sumDt, sumDtSq;
 
   noInterrupts();
   accepted = isrAcceptedPulses;
@@ -876,6 +879,7 @@ void updateRpm() {
   rejected = isrRejectedEdges;
   validN = isrAcceptedIntervals;
   sumDt = isrSumDtUs;
+  sumDtSq = isrSumDtSqUs;
   minDt = isrMinDtUs;
   maxDt = isrMaxDtUs;
   lastPulseUs = isrLastAcceptedPulseUs;
@@ -887,6 +891,7 @@ void updateRpm() {
   isrRejectedEdges = 0;
   isrAcceptedIntervals = 0;
   isrSumDtUs = 0;
+  isrSumDtSqUs = 0;
   isrMinDtUs = 0xFFFFFFFFUL;
   isrMaxDtUs = 0;
   interrupts();
@@ -927,8 +932,17 @@ void updateRpm() {
 
   if (validN > 0) {
     rpmData.avgIntervalUs = (float)sumDt / (float)validN;
-    rpmData.jitterPct = (minDt != 0xFFFFFFFFUL && rpmData.avgIntervalUs > 0.0f) ?
-                        ((float)(maxDt - minDt) * 100.0f / rpmData.avgIntervalUs) : 0.0f;
+    // Jitter = coefficient of variation (stddev/mean), not (max-min)/mean. A single
+    // stray long interval in the window skews max-min heavily regardless of how
+    // many clean samples surround it; stddev divides the outlier's contribution by
+    // validN, so one glitch no longer swamps an otherwise-clean signal into a false
+    // RPM_WARN/RPM_NOISY.
+    double meanUs = (double)sumDt / (double)validN;
+    double meanSqUs = (double)sumDtSq / (double)validN;
+    double variance = meanSqUs - meanUs * meanUs;
+    if (variance < 0.0) variance = 0.0;  // fp rounding guard
+    float stddevUs = sqrtf((float)variance);
+    rpmData.jitterPct = (rpmData.avgIntervalUs > 0.0f) ? (stddevUs * 100.0f / rpmData.avgIntervalUs) : 0.0f;
   } else if (!rpmData.signalRecent) {
     rpmData.avgIntervalUs = 0.0f;
     rpmData.jitterPct = 0.0f;
@@ -1103,18 +1117,23 @@ void initSdLogging() {
   sdOk = true;
   sdWriteFailCount = 0;
 
+  bool slotsFull = false;
   for (uint16_t i = 0; i < 1000; i++) {
     snprintf(sdLogPath, sizeof(sdLogPath), "/ECU%03u.CSV", i);
     if (!SD.exists(sdLogPath)) break;
     if (i == 999) {
-      Serial.println("SD LOG: WARNING - all 1000 slots full! Delete old files. Using ECU999.CSV (appending).");
-      // sdLogPath already holds "/ECU999.CSV"; appending will add a header mid-file.
-      // Operator must manually clear SD card.
+      slotsFull = true;
+      Serial.println("SD LOG: WARNING - all 1000 slots full! Delete old files. Appending to ECU999.CSV WITHOUT a new header to avoid corrupting its existing data.");
     }
   }
 
-  sdAppendLine("ms,type,mode,stage,egtC,dEgtCps,rpm,targetRpm,pumpUs,flowMlMin,fuelTargetUs,starterUs,ign,valve1,valve2,throttlePct,abortReason,event");
-  sdLogEvent("BOOT SD_LOG_READY");
+  // Only write a fresh header when sdLogPath is a brand-new (empty) file. Falling
+  // back to an already-full ECU999.CSV must not insert another header row mid-file,
+  // which would break any tool that assumes a single header at the top of the CSV.
+  if (!slotsFull) {
+    sdAppendLine("ms,type,mode,stage,egtC,dEgtCps,rpm,targetRpm,pumpUs,flowMlMin,fuelTargetUs,starterUs,ign,valve1,valve2,throttlePct,abortReason,event");
+  }
+  sdLogEvent(slotsFull ? "BOOT SD_LOG_READY (slots full, appending without header)" : "BOOT SD_LOG_READY");
 
   Serial.print("SD LOG: OK file="); Serial.println(sdLogPath);
   Serial.print("SD LOG: cardSizeMB="); Serial.println(SD.cardSize() / (1024 * 1024));

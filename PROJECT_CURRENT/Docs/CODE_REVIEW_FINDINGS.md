@@ -82,7 +82,7 @@ Nếu đã có đủ 1000 files (ECU000.CSV đến ECU999.CSV), vòng lặp tìm
 
 ---
 
-## 📊 Điểm An Toàn Tổng Thể
+## 📊 Điểm An Toàn Tổng Thể (lúc review ban đầu, trước khi fix)
 
 | Hạng mục | Điểm |
 |----------|------|
@@ -93,20 +93,16 @@ Nếu đã có đủ 1000 files (ECU000.CSV đến ECU999.CSV), vòng lặp tìm
 | Serial/Web interface safety | 6/10 *(vấn đề #2, #5)* |
 | **Tổng** | **7.5/10** |
 
+**Cập nhật**: cả 8 vấn đề trên đã được fix (xem checklist bên dưới) — bảng
+điểm này chỉ còn giá trị lịch sử, không phản ánh trạng thái code hiện tại.
+
 ---
 
 ## 🚀 Quyết Định: Có Upload ESP32 Được Không?
 
-**YES — Có thể upload, nhưng vận hành với các ràng buộc sau**:
-
-| # | Ràng buộc vận hành | Lý do |
-|---|-------------------|-------|
-| 1 | **Không dùng Web "SAFE OFF" khi EGT > 100°C** | Vấn đề #1: không có EGT guard |
-| 2 | **Sau mỗi ABORT, đọc kỹ lý do abort trên Serial/Web trước khi re-arm** | Vấn đề #2: restart không yêu cầu xác nhận |
-| 3 | **Không gõ command Serial chậm/ngắt quãng khi engine đang chạy** | Vấn đề #5: block loop 1s |
-| 4 | **Không để SD đầy 1000 files** | Vấn đề #6: ghi đè log |
-
-**Các vấn đề HIGH #1 và #2 nên được fix trước khi test engine thực sự (không cấp bách cho lab test).**
+**YES — đã fix toàn bộ 8/8 vấn đề vòng 1** (trước đây có 4 ràng buộc vận
+hành tạm thời cho #1/#2/#5/#6, nay không còn cần thiết vì các lỗi gốc đã
+được fix trong code thay vì né bằng quy trình vận hành).
 
 ---
 
@@ -114,19 +110,22 @@ Nếu đã có đủ 1000 files (ECU000.CSV đến ECU999.CSV), vòng lặp tìm
 
 ```
 Fix ngay (trước lab test):
-[ ] #5 Non-blocking serial command buffer
+[x] #5 Non-blocking serial command buffer
 
 Fix trước engine test thực sự:
-[ ] #1 EGT guard trong stage2Off()
-[ ] #2 Require clearAbort trước startidle
-[ ] #3 resetRpmStats() trước wet start spin-up
+[x] #1 EGT guard trong stage2Off()
+[x] #2 Require clearAbort trước startidle
+[x] #3 resetRpmStats() trước wet start spin-up
 
 Fix sau (ít quan trọng hơn):
-[ ] #4 Reset gradientCps khi EGT invalid  
-[ ] #6 SD slot overflow handling
-[ ] #7 Single SPI read cho readCelsius + readError
-[ ] #8 Dùng median thay max-min cho jitter
+[x] #4 Reset gradientCps khi EGT invalid
+[x] #6 SD slot overflow handling — không còn ghi header mới đè vào ECU999.CSV khi đầy 1000 slot
+[x] #7 Single SPI read cho readCelsius + readError — đổi thứ tự đọc readError() trước
+[x] #8 Dùng stddev thay max-min cho jitter — coefficient of variation, không bị 1 outlier làm sai
 ```
+
+**Tất cả 8 lỗi vòng 1 đã fix (2026-07-16).** Compile sạch (`g++ -fsyntax-only
+-Wall -Wextra`, không warning).
 
 ---
 
