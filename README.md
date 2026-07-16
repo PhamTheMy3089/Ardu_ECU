@@ -1,248 +1,140 @@
-# Ardu_ECU - Arduino based ECU for Model Jet Engines
+# Ardu_ECU — Arduino ECU cho Động Cơ Phản Lực Mô Hình
 
-Easy to build and use Engine Control Unit (ECU) for model Jet engines.
-
-## 🚀 Quick Start - CURRENT PROJECT
-
-**Active Project Files** (Start Here):
-- 📄 **[PROJECT_CURRENT/](PROJECT_CURRENT/)** - Your current project (3 files)
-  - `ECU_TestV1_EGT_DRY_START_PATCH.ino` - Main firmware
-  - `RPM_Sensor_20260709.net` - RPM sensor schematic
-  - `SCH_MinijetengineECU_20260709.json` - ECU design schema
-
-**Reference Materials** (For Learning):
-- 📚 **[REFERENCES/](REFERENCES/)** - Cloned project files (for reference only)
-  - Firmware from various versions (Rev9-Rev12, TestV1)
-  - Hardware designs and 3D models
-  - Old manuals and documentation
+ECU (Engine Control Unit) dễ tự chế tạo cho động cơ phản lực mô hình,
+chạy trên nền ESP32 với giao diện cấu hình và giám sát qua web browser.
 
 ---
 
-## 📂 Project Structure
+## Cấu Trúc Project
 
 ```
 Ardu_ECU/
 │
-├── 📁 PROJECT_CURRENT/          ← Your Active Project (3 files)
-│   ├── ECU_TestV1_EGT_DRY_START_PATCH.ino
-│   ├── RPM_Sensor_20260709.net
-│   ├── SCH_MinijetengineECU_20260709.json
-│   └── README.md               ← Start here!
+├── PROJECT_CURRENT/           ← Dự án đang phát triển (bắt đầu từ đây)
+│   ├── Firmware/              ← Code ESP32
+│   │   └── ECU_TestV1_EGT_DRY_START_PATCH/
+│   │       └── *.ino          ← Mở bằng Arduino IDE
+│   ├── Hardware/              ← Thiết kế mạch
+│   │   ├── RPM_Sensor_20260709.net
+│   │   └── SCH_MinijetengineECU_20260709.json
+│   └── Docs/                  ← Tài liệu kỹ thuật
+│       ├── UPLOAD_AND_TEST_GUIDE.md
+│       ├── DSO152_RPM_CALIBRATION_GUIDE.md
+│       ├── PRE_ENGINE_TEST_GUIDE.md
+│       ├── CODE_ARCHITECTURE.md
+│       └── CODE_REVIEW_FINDINGS.md
 │
-├── 📁 REFERENCES/              ← Reference Materials (Archive)
-│   ├── Firmware/               ← Old firmware versions (Rev9-Rev12)
-│   ├── Hardware/               ← Schematics, 3D models, components
-│   ├── Documentation/          ← Old manuals and guides
-│   └── README.md               ← Reference guide
+├── TEST/                      ← Firmware test riêng lẻ (bench test)
+│   └── TEST_STARTER/
+│       └── TEST_STARTER.ino   ← Test RPM sensor + starter (không cần ARM)
 │
-├── 📄 README.md               ← This file
-├── 📄 PROJECT_REVIEW.md       ← Comprehensive project analysis
-├── 📄 STRUCTURE.md            ← Detailed structure explanation
-│
-└── 📄 Original Project Docs (from main repo)
+└── REFERENCES/                ← Tài liệu tham khảo (không dùng cho sản xuất)
+    ├── Firmware/              ← Firmware cũ: Rev9, Rev10, Rev11, Rev12
+    ├── Hardware/              ← Sơ đồ mạch cũ, ảnh linh kiện, file 3D
+    └── Documentation/         ← Manual cũ + tài liệu động cơ
 ```
 
 ---
 
-## 🎯 What to Do
+## Bắt Đầu Nhanh
 
-### ✅ For Current Project Development:
-1. Go to **[PROJECT_CURRENT/](PROJECT_CURRENT/)** 
-2. Read `PROJECT_CURRENT/README.md`
-3. Use the 3 files for your active work
-4. Upload `ECU_TestV1_EGT_DRY_START_PATCH.ino` to ESP32
+### 1. Upload Firmware Chính
+```
+Mở: PROJECT_CURRENT/Firmware/ECU_TestV1_EGT_DRY_START_PATCH/
+          ECU_TestV1_EGT_DRY_START_PATCH.ino
+Board: ESP32 Dev Module (hoặc NodeMCU-32S)
+Baudrate Serial: 115200
+```
 
-### 📚 For Learning/Reference:
-1. Explore **[REFERENCES/](REFERENCES/)** folder
-2. Study different firmware versions
-3. Review old hardware designs
-4. Read legacy manuals
+### 2. Kết Nối Web UI
+```
+WiFi: ECU_TestV1  |  Pass: admin1234
+URL:  http://192.168.4.1
+```
+
+### 3. Đọc Tài Liệu Theo Thứ Tự
+
+| Thứ tự | File | Mục đích |
+|--------|------|---------|
+| 1 | `PROJECT_CURRENT/Docs/UPLOAD_AND_TEST_GUIDE.md` | Upload và test lần đầu |
+| 2 | `PROJECT_CURRENT/Docs/DSO152_RPM_CALIBRATION_GUIDE.md` | Hiệu chỉnh cảm biến RPM |
+| 3 | `PROJECT_CURRENT/Docs/PRE_ENGINE_TEST_GUIDE.md` | Quy trình trước khi test engine |
+| 4 | `PROJECT_CURRENT/Docs/CODE_ARCHITECTURE.md` | Hiểu sâu firmware |
+| 5 | `PROJECT_CURRENT/Docs/CODE_REVIEW_FINDINGS.md` | Các lỗi đã biết và đã fix |
 
 ---
 
-## Project Overview
+## Tính Năng Firmware Hiện Tại
 
-* Based on Arduino code and running on ESP32 based hardware
-* ECU configuration using a simple web browser
-* Engine operating parameters displayed using a web browser interface
-* Use off the shelf components for electronics e.g.
-        Brushed or brushless Speed controller for starter motor and fuel pump control
-        MOSFET module for gas valve solenoid control
-        Glow plug driver module for providing power to glow plug.
+- **EGT open dry-start**: khi thermocouple bị hở, tự động chuyển sang chế độ test RPM (starter chạy, nhiên liệu/van/lửa tắt hoàn toàn)
+- **Hybrid fuel control**: bảng hiệu chuẩn pump (us ↔ ml/min) + điều chỉnh ±1µs/bước theo RPM
+- **EGT gradient lookahead 3s**: ngăn tăng nhiên liệu nếu dự đoán EGT sẽ vượt ngưỡng
+- **RPM noise guard**: lọc nhiễu tĩnh khi tất cả output OFF (REST_GUARD)
+- **Test Wizard 9 bước**: phải pass trước khi cho phép start
+- **ACCEL_TO_IDLE timeout**: tự dừng nếu không đạt idle sau 20s
+- **Cooldown**: chạy starter làm mát sau khi dừng/abort
+- **SD logging**: CSV 2 dòng/giây
+- **Web UI**: Dashboard, Controls, Test Wizard, Event Log
 
-## Table of Contents
+---
 
-1. [About the Project](#about-the-project)
-1. [Project Status](#project-status)
-2. [Project Videos](#project-videos)
-3. [Getting Started](#getting-started)
-	1. [Dependencies](#dependencies)
-	1. [Building](#building)
-	1. [Installation](#installation)
-	1. [Usage](#usage)
-4. [Release Process](#release-process)
-	1. [Versioning](#versioning)
-	1. [How to Get Help](#how-to-get-help)
-5. [Contributing](#contributing)
-6. [License](#license)
-7. [Authors](#authors)
-8. [Acknowledgments](#acknowledgements)
+## Phần Cứng
 
-## About the Project
+**Vi điều khiển**: ESP32 DevKit V1 (NodeMCU-32S)
 
+| Cảm biến / Thiết bị | Giao tiếp | Chân GPIO |
+|--------------------|----------|----------|
+| Thermocouple K (MAX31855) | SPI | CLK=18, CS=5, DO=19 |
+| RPM sensor (KMZ10A) | Digital | 33 |
+| Pump ESC | PWM | 26 |
+| Starter ESC | PWM | 25 |
+| Valve 1 | Digital | 17 |
+| Valve 2 | Digital | 16 |
+| Ignition / Glow plug | Digital | 32 |
+| User button | Digital | 22 (active LOW) |
+| Status LED | Digital | 2 (active LOW) |
+| MicroSD (SPI) | SPI | CS=13, SCK=14, MOSI=23, MISO=27 |
 
-* Initial testing done on J66 model jet engine only 
-* Currently uses only two parameters from engine 1- Exhaust Gas Temperature and 2- Engine RPM
-* EGT is measured using a K-type Thermocouple
-* Engine RPM is measured using a magnet in spinner nut and a hall sensor to detect engine RPM 
+**Mạch cảm biến RPM**: KMZ10A → INA826 (gain ×38) → LMV358 (op-amp trim) → LMV393 (comparator Schmitt) → GPIO33  
+Ba trimpot: RP1 (offset), RP2 (gain), RP3 (threshold). Xem `Docs/DSO152_RPM_CALIBRATION_GUIDE.md`.
 
+---
 
+## Firmware Test Riêng (TEST/)
 
-**[Back to top](#table-of-contents)**
+| Firmware | Mục đích |
+|----------|---------|
+| `TEST/TEST_STARTER/TEST_STARTER.ino` | Test RPM sensor + starter PWM: dùng `+`/`-` tăng/giảm PWM, đánh giá NOISE và STAB tự động |
 
-## Project Status
+---
 
-Although based on Arduino framework, current Arduino code uses some libraries which are specific to ESP32 and will not readily compile for other platforms. 
+## Thư Viện Cần Cài (Arduino IDE)
 
-### Release Version:
-* Current ECU release version is Rev 11. This version has been tested with gas start engine and is working fine with no known issues.
+```
+ESP32Servo
+Adafruit_MAX31855
+WiFi         (có sẵn trong ESP32 core)
+WebServer    (có sẵn trong ESP32 core)
+SD           (có sẵn trong ESP32 core)
+```
 
-### Test Version:
-* Current test version is ECU Rev12TC10. This version uses different pinouts due to more sensors. This is still under test with not all code fully tested. Being released for community to test and release.
+---
 
-#### New Features include:
-* Kero Start --Tested and working
-* Ability to save and load configuration files -- Tested and working
-* Realtime Serial data logging -- Tested and working
-* Ability to read pressure sensor --Tested and working
-* Ability to read load cell --Tested but has errors
-* New starting methods included are open loop throttle start and pressure sensor start --not tested
+## Tài Liệu Tham Khảo (REFERENCES/)
 
+| Thư mục | Nội dung |
+|---------|---------|
+| `Firmware/Rev11/` | Firmware ổn định Rev11 (tham khảo kiến trúc) |
+| `Firmware/Rev12_TC10/` | Rev12 nhiều cảm biến (pressure, load cell) |
+| `Hardware/Schematics/` | Sơ đồ mạch Rev9–11 |
+| `Hardware/3D Printable Files/` | File STL motor mount, Bendix sleeve |
+| `Documentation/Engine_Manual_NewerModel.pdf` | Tài liệu động cơ thế hệ mới |
+| `Documentation/Luu_Luong_Bom_Thuc_Te.txt` | Lưu lượng bơm đo thực tế |
 
+---
 
-**[Back to top](#table-of-contents)**
+## Liên Hệ & Đóng Góp
 
-## Project Videos
-* 1-Project concept 	https://youtu.be/Xl8DUmeqQWw
-* 2-Project setup 	https://youtu.be/wCetENek3wA
-* 3-Testing Firmware 	https://youtu.be/1cKAqnF0G1I
-* 4-New user interface 	https://youtu.be/sQsggVR1LOk
-* 5-Multiple Test Runs  https://youtu.be/5c6H9qnOwm4
-* 6-High acceleration	https://youtu.be/lYJ67fU-_sc
-* 7-User interface	https://youtu.be/T5aCW-EMLBw
-* 8-Final Release Test	https://youtu.be/rOXXS8oFhO8
-* 9-Thrust Test 	https://youtu.be/VEnOmlrnRFM
-* 10-ECU Rev11 Release  https://youtu.be/CBFElKNjws0
-### Dependencies
-
-* #include <soc/pcnt_struct.h>
-* #include <driver/pcnt.h>
-* #include <Wire.h>
-* #include <U8g2lib.h>
-* #include <Preferences.h>
-* #include "RunningAverage.h"
-* #include <FS.h>
-* #include <SPI.h>
-* #include <SD.h>
-* #include <MAX31855.h>//url = https://github.com/enjoyneering/MAX31855
-* #include <ESP32Servo.h> 
-* #include <EasyButton.h>
-* #include <AsyncTCP.h>
-* #include <ESPAsyncWebServer.h>
-* #include <DNSServer.h>
-* #include <WiFi.h>
-* #include <ArduinoJson.h>
-
-### Getting the Source
-
-ECU-Rev11  is the latest firmware 
-
-### Installation
-
-Upload to ESP32 Devkit V1 using Arduino IDE
-
-### Usage
-
-Each release will refer to hardware and software configuration for usage.
-Current code is compiled on Arduino 1.8.19 and is running on ESP32 Devkit V1.
-The electronic schemetic is included in repository
-
-**[Back to top](#table-of-contents)**
-
-## Release Process
-
-Release will require testing on an actual engine. 
-Test conditions and results are to be shared with the release version
-
-### Versioning
-
-We are using whole number versioning. We will not do a major or minor release
-Current Release is Rev 11
-
-## ECU Rev 10 Notes
-Added a slider control on Page1 to switch off WebServer. This is helpful in actual flying jets as you dont want a transmitter next to your RC receiver. Only WiFi is switched off, other functiond work as normal
-Software corrections-DynamicJsonDoc moved from global to local- Removed OLED Displays, Updated Page 4 for battery voltage and maxLoopTime- Added Page 6 to track engine and ECU lifetime usage
-
-**[Back to top](#table-of-contents)**
-
-## ECU Rev 11 Notes
-
-* Major hardware redesign
-* Changed Pin assignments and added 4 wire SD card capability
-* SD Card functions running on Core 0 while Main loop is running on Core 1.
-* Changed data range to 0-1000
-* At each power up two files are written to SD Card. 
-        **  1) Settings file with all the settings at power up and
-        **  2) Data file with engine operating data from power up till the ECU is powered off
-* Added sd loop time and data file name info on Page 5.
-* Added buttons on page 5 to reset error,manage files and change ECU modes.
-* Added page 7 to be able to download and delete data files
-* Added Fuel Solenoid capability. Added Two LED's to Show WiFi State and SD Recording state.SD card pinout as below
-          http://3.bp.blogspot.com/_8JZhVVmpICU/TH_Pxa19MHI/AAAAAAAAApg/pgSppwx0gY8/s1600/SD+card+pinout.jpg
-* Added ability to change ECU Webserver WiFi SSID and Password on page 2
-* Added option for Magnetic (1 Pulse per revolution)  or Optical (2 pulses per revolution)  RPM sensor 
-* Implemented tempGradient check to limit sharp rise in exhaust temperature (tempGrad and maxTempGrad variables)
-* Implemented lookahead for temperature and stop increasing fuel flow if exhaust temp will increase above maxTemp in 3 sec (tempGrad x 3)
-
-
-
-**[Back to top](#table-of-contents)**
-
-## Contact Us
-
-For any help, suggestions, proposals you can send me an email at jehanzeb@digipak.org
-
-
-## Contributing
-
-All contributions are welcome. If you want to share your version on this repository or share a link to your version, we will be glad to do so. We have limited resources to review other peoples work so any contribution will be taken as is and not reviewed. 
-
-**[Back to top](#table-of-contents)**
-
-
-
-## License
-
-Copyright (c) 2022 Jehanzeb Khan
-
-This project is licensed under the GNU AGPLv3 License - see [LICENSE.md](LICENSE.md) file for details.
-
-**[Back to top](#table-of-contents)**
-
-## Authors
-
-* **[Jehanzeb Khan](https://github.com/Jehanzeb1973)** - *Initial work* - [DigiPak](https://digipak.org/)
-
-
-
-**[Back to top](#table-of-contents)**
-
-## Acknowledgments
-
-* https://randomnerdtutorials.com/esp32-web-server-gauges/
-* https://www.arduinoslovakia.eu/?lang=en
-* https://canvas-gauges.com/
-
-
-
-**[Back to top](#table-of-contents)**
+- **Tác giả gốc**: Jehanzeb Khan — jehanzeb@digipak.org
+- **License**: GNU AGPLv3 — xem [LICENSE.md](LICENSE.md)
+- Mọi đóng góp đều được chào đón. Xem thêm tại [GitHub Issues](https://github.com/phamthemy3089/Ardu_ECU/issues).
