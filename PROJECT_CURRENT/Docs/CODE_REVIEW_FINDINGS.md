@@ -176,6 +176,25 @@ nhiên liệu/lửa).
 
 ---
 
+# 🔁 Review Vòng 3 (2026-07-16) — So sánh với Rev11/Rev12_TC10, 2 lỗi đã fix
+
+So sánh cấu trúc + an toàn với 2 bản firmware tham khảo
+(`REFERENCES/Firmware/Rev11`, `REFERENCES/Firmware/Rev12_TC10`). Kết luận
+chung: firmware hiện tại **an toàn hơn** cả 2 bản tham khảo ở mọi interlock
+cốt lõi (abort cứng, cooldown thật, ARM/START 2 bước, RPM noise
+classification, Test Wizard checklist). Tuy nhiên tìm được 2 khoảng trống
+so với Rev11/12, cả 2 đã được fix:
+
+| # | Vị trí | Lỗi | Cách fix |
+|---|--------|-----|---------|
+| 1 | Không có tương đương RC-signal-loss failsafe của Rev11/12 | `throttlePct` là giá trị chốt qua lệnh Serial/Web rời rạc; nếu mất kết nối Web UI/Serial giữa lúc `MODE_IDLING`/`MODE_OPERATING`, động cơ chạy mãi ở ga cuối cùng không ai giám sát | Thêm **comm watchdog**: `lastOperatorLinkMs` cập nhật ở mọi lệnh (`handleCommand()`) và mỗi lần Web UI poll `/api` (tự động mỗi 700ms khi tab mở). `checkFailures()` tự abort `COMM_TIMEOUT` nếu quá `cfg.commTimeoutMs` (mặc định 8000ms, chỉnh qua `set commtimeout <3000..60000>`) không có tín hiệu nào trong lúc IDLING/OPERATING. Tắt qua `set commwatchdog off` yêu cầu `arm2` trước (debug only) |
+| 2 | `abortAll()` → `enterCooldown()` | Log snapshot lúc abort bị ghi **sau khi** `enterCooldown()` đã zero hóa `fuelTargetUs`/`pumpUs`/`ignCmd`/`startUs` → SD/event log thể hiện giá trị đã an toàn hóa, không phải giá trị thật lúc lỗi xảy ra, làm giảm giá trị chẩn đoán sự cố | `abortAll()` gọi `addLog("ABORT_SNAPSHOT reason=...")` **trước** khi gọi `enterCooldown()`, chụp đúng RPM/EGT/fuel/outputs tại thời điểm lỗi |
+
+**Verify**: compile sạch (`g++ -fsyntax-only -Wall -Wextra`, mock ESP32/Servo/
+MAX31855/WiFi/WebServer/SD, không warning).
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-16 (vòng 2)
+**Lần cập nhật**: 2026-07-16 (vòng 3)

@@ -143,6 +143,13 @@ struct Config {
   int cooldownTargetC = 120;
   int cooldownStarterUs = 1100;
 
+  // Comm watchdog: while fueled (IDLING/OPERATING), the operator must prove the
+  // Serial/Web link is alive (any command, or the Web UI's automatic /api poll)
+  // within this window, or the ECU auto-aborts instead of running unattended
+  // at the last commanded throttle forever.
+  bool commWatchdogEnabled = true;
+  uint32_t commTimeoutMs = 8000;
+
   // Fuel output ramp delays. Low-RPM delays are intentionally slower, similar to Ardu_ECU.
   uint32_t accelStepDelayMs = 100;
   uint32_t decelStepDelayMs = 120;
@@ -177,6 +184,7 @@ bool cooldownAfterAbort = false;
 bool stage2Armed = false;
 bool abortAcknowledged = false;  // must be set via clearabort before re-arm from ABORTED
 uint32_t stage2ArmUntilMs = 0, manualIgnOffAtMs = 0, manualStartOffAtMs = 0;
+uint32_t lastOperatorLinkMs = 0;  // last Serial/Web command or Web UI /api poll; feeds the comm watchdog
 String lastAbortReason = "NONE";
 String serialCmdBuf = "";  // non-blocking serial command accumulator
 int throttlePct = 0;
@@ -478,6 +486,10 @@ void enterCooldown(bool afterAbort, const String& reason) {
 void abortAll(const String& reason) {
   lastAbortReason = reason;
   abortAcknowledged = false;
+  // Snapshot RPM/EGT/fuel/outputs at the instant of the fault, before enterCooldown()
+  // zeroes fuelTargetUs/pumpUs/ignCmd/startUs. Without this, the logged event line
+  // shows the already-safed outputs instead of the values that caused the abort.
+  addLog(String("ABORT_SNAPSHOT reason=") + reason);
   Serial.println();
   Serial.print("ABORT: ");
   Serial.print(reason);
@@ -1457,7 +1469,7 @@ setInterval(load,700);load();
 void setupWebServer() {
   if (webRoutesReady) return;
   server.on("/", []() { server.send(200, "text/html", htmlPage()); });
-  server.on("/api", []() { server.send(200, "application/json", webStatusJson()); });
+  server.on("/api", []() { lastOperatorLinkMs = millis(); server.send(200, "application/json", webStatusJson()); });
   server.on("/cmd", []() {
     String c = server.hasArg("c") ? server.arg("c") : "";
     if (c.length()) handleCommand(c);
@@ -1708,6 +1720,12 @@ void updateCooldown() {
 
 void checkFailures() {
   if (ecuMode == MODE_WAITING || ecuMode == MODE_COOLDOWN || ecuMode == MODE_ABORTED) return;
+  // Comm watchdog: while fueled (IDLING/OPERATING), require a live operator link
+  // (Serial/Web command or the Web UI's automatic /api poll) within commTimeoutMs.
+  // Without this, a closed browser tab or dropped serial session would leave the
+  // engine running at the last commanded throttle with nothing watching it.
+  if (cfg.commWatchdogEnabled && (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) &&
+      millis() - lastOperatorLinkMs > cfg.commTimeoutMs) { abortAll("COMM_TIMEOUT"); return; }
   if (!dryStartActive && cfg.abortOnEgtFault && !egt.ok) { abortAll("EGT_FAULT"); return; }
   if (egt.ok && egt.c >= cfg.maxEgtC) { abortAll("OVER_TEMP"); return; }
   if (rpmMeasurementUsable() && rpmData.rpm >= cfg.maxRpm) { abortAll("OVERSPEED"); return; }
@@ -1732,6 +1750,7 @@ void printConfig() {
   Serial.print("rpmTolerance="); Serial.println(cfg.rpmTolerance);
   Serial.print("accelToIdleTimeoutMs="); Serial.println(cfg.accelToIdleTimeoutMs);
   Serial.print("cooldown min/timeout/target/starter="); Serial.print(cfg.cooldownMinMs); Serial.print("ms/"); Serial.print(cfg.cooldownTimeoutMs); Serial.print("ms/"); Serial.print(cfg.cooldownTargetC); Serial.print("C/"); Serial.print(cfg.cooldownStarterUs); Serial.println("us");
+  Serial.print("commWatchdogEnabled="); Serial.print(cfg.commWatchdogEnabled ? "ON" : "OFF"); Serial.print(" commTimeoutMs="); Serial.println(cfg.commTimeoutMs);
   Serial.print("fuelTargetRpm="); Serial.println(fuelTargetRpm);
   Serial.print("fuelTargetUs="); Serial.print(fuelTargetUs); Serial.print(" (~"); Serial.print(flowFromUs(fuelTargetUs), 1); Serial.println(" ml/min)");
   Serial.print("accel/decel ms="); Serial.print(cfg.accelStepDelayMs); Serial.print("/"); Serial.print(cfg.decelStepDelayMs);
@@ -1772,6 +1791,8 @@ void printHelp() {
   Serial.println("set idlerpm <rpm> | set maxrpm <rpm> | set rpmtol <rpm> | set maxegt <C>");
   Serial.println("set acceltoidlems <ms> | set cooldownms <minMs> <timeoutMs> | set cooltarget <C> | set coolstarter <us>");
   Serial.println("set throttle <0..100> | set accelms <ms> | set decelms <ms> | set lowaccelms <ms> | set lowdecelms <ms>");
+  Serial.println("set commtimeout <3000..60000> -> comm watchdog window (ms) while IDLING/OPERATING");
+  Serial.println("set commwatchdog on/off -> abort if no Serial/Web link within commtimeout (arm2 required to disable)");
   Serial.println("set rpmfilter <20..5000>  -> software glitch filter in us");
   Serial.println("set rpmedge rising|falling -> RPM interrupt edge");
   Serial.println("RPM guard: WAITING+outputs OFF + any edge => RPM=0, SIG=REST_NOISE, start blocked");
@@ -1868,6 +1889,7 @@ bool parseTwoInts(const String& cmd, int& a, uint32_t& b) {
 }
 
 void handleCommand(String cmd) {
+  lastOperatorLinkMs = millis();  // any Serial/Web command counts as proof the operator is present
   cmd.trim(); cmd.toLowerCase(); if (!cmd.length()) return;
   if (cmd == "help") { printHelp(); return; }
   if (cmd == "status") { printStatus(true); return; }
@@ -2008,6 +2030,9 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set lowaccelms ")) { int v = numberAfter(cmd, "set lowaccelms "); if (v < 100 || v > 3000) { Serial.println("ERROR: lowaccelms 100..3000"); return; } cfg.lowAccelStepDelayMs = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set lowdecelms ")) { int v = numberAfter(cmd, "set lowdecelms "); if (v < 100 || v > 3000) { Serial.println("ERROR: lowdecelms 100..3000"); return; } cfg.lowDecelStepDelayMs = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set throttle ")) { throttlePct = constrain((int)numberAfter(cmd, "set throttle "), 0, 100); Serial.println("OK"); return; }
+  if (cmd.startsWith("set commtimeout ")) { int v = numberAfter(cmd, "set commtimeout "); if (v < 3000 || v > 60000) { Serial.println("ERROR: commtimeout 3000..60000 ms"); return; } cfg.commTimeoutMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd == "set commwatchdog on") { cfg.commWatchdogEnabled = true; Serial.println("Comm watchdog ON"); addLog("COMM WATCHDOG ON"); return; }
+  if (cmd == "set commwatchdog off") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } cfg.commWatchdogEnabled = false; Serial.println("Comm watchdog OFF - DEBUG ONLY"); addLog("COMM WATCHDOG OFF"); return; }
 
   Serial.println("Unknown command. Type help");
 }
@@ -2025,6 +2050,7 @@ void setup() {
   escPump.attach(PIN_ESC_PUMP, ESC_MIN_US, ESC_MAX_US);
   escStart.attach(PIN_ESC_START, ESC_MIN_US, ESC_MAX_US);
   forceSafeOutputs();
+  lastOperatorLinkMs = millis();
   bool thermoOk = thermo.begin();
   thermo.setFaultChecks(MAX31855_FAULT_ALL);
   enterWaitingSafe();
