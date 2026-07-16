@@ -43,23 +43,12 @@ Thư mục chứa mã nguồn firmware cho các phiên bản khác nhau của EC
 - `ECU_Rev12_TC10.ino` - Test firmware
 - `page1.h` to `page9.h` - Extended configuration (9 pages)
 
-### **TestV1_EGT_DRY_START** 🚀 Latest Development
-- **Status**: Current development version
-- **Latest Features**:
-  - EGT-open dry-start patch
-  - ACCEL_TO_IDLE timeout safety
-  - Real cooldown airflow management
-  - RPM noise diagnostics enhancement
-  - Hybrid fuel control
-  - Web UI (ESP32 SoftAP)
-  - SD logging with CSV telemetry
-  - Enhanced button logic
-
 ## 🔧 How to Use
 
 1. **For Production**: Use `Rev11` - proven stable version
-2. **For Testing**: Use `Rev12_TC10` or `TestV1_EGT_DRY_START`
+2. **For Testing**: Use `Rev12_TC10`
 3. **For Reference**: Check older versions in archives
+4. **For the active project**: see `/PROJECT_CURRENT/Firmware/ECU_TestV1_EGT_DRY_START_PATCH/` (not a reference version — this is the live firmware)
 
 ## 📝 Uploading Firmware
 
@@ -81,4 +70,4 @@ All firmware versions use common libraries:
 
 ---
 
-For more information, see [README.md](../README.md) and [STRUCTURE.md](../STRUCTURE.md)
+For more information, see [README.md](../README.md)
