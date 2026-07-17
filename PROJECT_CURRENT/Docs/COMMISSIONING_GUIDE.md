@@ -249,14 +249,21 @@ KMZ10A (U17, header 4 chân)
 
 ### Cài Đặt DSO152
 
-| Bước | Probe tại | Coupling | Volt/div | Time/div | Trigger |
-|------|-----------|----------|----------|----------|---------|
+> DSO152 chỉ có 3 chế độ trigger: **Auto** (tự động quét liên tục, hiển thị
+> cả khi chưa đủ điều kiện trigger — dùng cho hầu hết các bước quan sát
+> tín hiệu lặp lại/DC), **Normal** (chỉ vẽ lại màn hình khi tín hiệu thật
+> sự cắt qua mức trigger — dùng khi muốn khóa hình ổn định hơn cho xung
+> lặp đều), **Single** (bắt 1 lần rồi dừng — ít dùng trong quy trình này).
+> Không có tùy chọn chọn cạnh lên/xuống (rising/falling) riêng.
+
+| Bước | Probe tại | Coupling | Volt/div | Time/div | Mode |
+|------|-----------|----------|----------|----------|------|
 | A1a | TP_5V (U16) | DC | 2V | 10ms | Auto |
 | A1b | TP_VREF (U14) | DC | 1V | 10ms | Auto |
 | A2 | TP_INA_OUT (U3) | AC | 500mV | 2ms | Auto |
 | A3/A4 | TP_LMV358_OUT (U1) | DC | 1V | 2ms | Auto |
-| A5 | TP_RPM_OUT (U2) | DC | 2V | 2ms | Rising |
-| A-cuối | GPIO33 | DC | 2V | 2ms | Rising |
+| A5 | TP_RPM_OUT (U2) | DC | 2V | 2ms | Auto (hoặc Normal nếu muốn khóa hình ổn định hơn) |
+| A-cuối | GPIO33 | DC | 2V | 2ms | Auto |
 
 > GND probe **luôn cắm vào U15 (TP_GND)**.
 
@@ -347,8 +354,8 @@ comparator — nghĩa là ngưỡng bật và ngưỡng tắt lệch nhau một 
 chống nhiễu quanh điểm ngưỡng. RP3 dịch chuyển cả cặp ngưỡng bật/tắt này
 lên xuống.
 
-*Thao tác*: probe tại U2 (TP_RPM_OUT), DC coupling, 2V/div, trigger
-Rising, quay magnet đều ~2 vòng/giây.
+*Thao tác*: probe tại U2 (TP_RPM_OUT), DC coupling, 2V/div, mode Auto
+(hoặc Normal nếu muốn khóa hình ổn định hơn), quay magnet đều ~2 vòng/giây.
 
 ```
 RP3 quá THẤP (ngưỡng dưới VREF quá xa):
