@@ -20,10 +20,9 @@ PROJECT_CURRENT/
 │
 ├── Docs/                              ← Tài liệu kỹ thuật
 │   ├── CODE_ARCHITECTURE.md           ← Kiến trúc firmware (state machine, ISR...)
-│   ├── CODE_REVIEW_FINDINGS.md        ← Kết quả review code (8 lỗi đã fix)
-│   ├── UPLOAD_AND_TEST_GUIDE.md       ← Hướng dẫn upload và test qua Serial/Web
-│   ├── PRE_ENGINE_TEST_GUIDE.md       ← Quy trình test trước khi chạy động cơ
-│   └── DSO152_RPM_CALIBRATION_GUIDE.md ← Hiệu chỉnh KMZ10A bằng oscilloscope
+│   ├── CODE_REVIEW_FINDINGS.md        ← Kết quả review code (các lỗi đã fix)
+│   └── COMMISSIONING_GUIDE.md         ← Hướng dẫn toàn diện: upload, hiệu chỉnh RPM,
+│                                          Test Wizard, dry/wet-start, tăng throttle
 │
 └── README.md                          ← File này
 ```
@@ -69,11 +68,9 @@ PROJECT_CURRENT/
 
 | # | File | Khi nào đọc |
 |---|------|------------|
-| 1 | `Docs/UPLOAD_AND_TEST_GUIDE.md` | Lần đầu upload ESP32 |
-| 2 | `Docs/DSO152_RPM_CALIBRATION_GUIDE.md` | Hiệu chỉnh cảm biến RPM |
-| 3 | `Docs/PRE_ENGINE_TEST_GUIDE.md` | Trước khi test động cơ thật |
-| 4 | `Docs/CODE_ARCHITECTURE.md` | Khi cần hiểu sâu firmware |
-| 5 | `Docs/CODE_REVIEW_FINDINGS.md` | Tham khảo các lỗi đã biết/đã fix |
+| 1 | `Docs/COMMISSIONING_GUIDE.md` | Từ lần đầu upload ESP32 tới chạy thật có throttle (gồm cả hiệu chỉnh RPM DSO152) |
+| 2 | `Docs/CODE_ARCHITECTURE.md` | Khi cần hiểu sâu firmware |
+| 3 | `Docs/CODE_REVIEW_FINDINGS.md` | Tham khảo các lỗi đã biết/đã fix |
 
 ---
 
@@ -82,7 +79,7 @@ PROJECT_CURRENT/
 - ESP32 chỉ chịu **3.3V** — dùng level converter cho tín hiệu 5V
 - Chỉ dùng **thermocouple loại K**
 - Cảm biến RPM KMZ10A cần hiệu chỉnh trimpot **RP1/RP2/RP3** trước khi dùng
-- Đọc `PRE_ENGINE_TEST_GUIDE.md` trước khi test có nhiên liệu
+- Đọc `COMMISSIONING_GUIDE.md` trước khi test có nhiên liệu
 
 ---
 
