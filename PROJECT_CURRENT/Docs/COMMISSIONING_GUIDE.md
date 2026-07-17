@@ -269,14 +269,47 @@ KMZ10A (U17, header 4 chân)
 
 ### GIAI ĐOẠN A — Hiệu Chỉnh Analog Bằng Oscilloscope
 
+**Cách quay magnet khi rotor nằm bên trong (không quay tay được)**
+
+Magnet gắn trên spinner nut/compressor wheel thường nằm sâu trong cửa hút,
+không phải lúc nào cũng thò tay quay trực tiếp được. Dùng phương pháp khác
+nhau tùy mục đích từng bước:
+
+- **Các bước A2-A4 (cần quan sát tín hiệu "sạch", không nhiễu điện)**:
+  dùng **quạt hoặc khí nén thổi vào cửa hút** để cánh quạt/compressor wheel
+  tự do quay theo luồng khí. Đây là cách quay **không sinh nhiễu điện**
+  (hoàn toàn thụ động, không motor/ESC nào chạy), phù hợp nhất để chỉnh
+  trimpot chính xác. Tốc độ không cần chính xác — chỉ cần quay đều vài
+  giây để quan sát dạng sóng ổn định.
+- **Bước A5, phần test EMI (cố ý đưa nhiễu thật vào)**: dùng **starter
+  motor** qua `starttest <us> <ms>` hoặc Test Wizard — mục đích ở đây khác
+  hẳn: cần nguồn nhiễu ESC/motor thật để kiểm tra RP3 đã chỉnh có đủ margin
+  chống nhiễu hay không.
+- Nếu rotor vẫn thò tay quay được (một số turbine cửa hút đủ rộng) — quay
+  tay là cách đơn giản nhất, vẫn dùng bình thường cho mọi bước A2-A5.
+
 **A1 — Kiểm tra nguồn** (không cần quay magnet)
 - U16: DC phẳng +5.0V ±0.2V. U14: DC ổn định 2.4-2.6V.
 - Sai → kiểm tra BEC/hàn R40/R39/C23/C1 trước khi tiếp tục.
 
 **A2 — Xem tín hiệu INA826 (U3)**
-- Quay magnet ~1-3 vòng/giây, AC coupling.
+- Quay magnet ~1-3 vòng/giây (quạt/khí nén hoặc tay, xem trên), AC coupling.
 - Kỳ vọng: sóng sin/quasi-sin, biên độ 200mV-1Vpp.
 - Không thấy gì → kiểm tra khoảng cách magnet-sensor (≤3mm), thử xoay KMZ10A 90°.
+
+*Nếu sóng không ra hình sin/quasi-sin*:
+
+| Dạng sóng thấy được | Nguyên nhân khả dĩ | Xử lý |
+|---|---|---|
+| Đỉnh bị cắt phẳng (clipping/vuông hóa) | Magnet quá gần/quá mạnh → INA826 bão hòa (gain ×38 cố định) | Đưa magnet ra xa hơn, hoặc đổi magnet yếu hơn |
+| Răng cưa/tam giác thay vì sin | Quay không đều (quạt thổi giật cục, hoặc tay quay không đều) | Quay đều hơn — không phải lỗi mạch |
+| Nhiễu loạn, không thấy chu kỳ rõ | EMI/nhiễu nền, dây tín hiệu gần dây công suất, tiếp xúc lỏng | Kiểm tra dây, tách xa nguồn nhiễu, xem lại A1 |
+| "Nhọn"/không tròn nhưng vẫn đều theo chu kỳ | Bình thường với AMR sensor — đây là lý do gọi "quasi-sin" | Không cần sửa, miễn biên độ đạt 200mV-1Vpp và có chu kỳ rõ |
+| Hoàn toàn phẳng, không AC | Sensor chết/sai hướng/mất nguồn | Xem lại A1, kiểm tra hướng KMZ10A, khoảng cách magnet |
+
+Nguyên tắc chung: miễn sóng **có chu kỳ rõ ràng, biên độ đủ, lặp lại đều
+theo tốc độ quay** thì không bắt buộc phải là sin hoàn hảo — bước RP1/RP2/
+RP3 tiếp theo sẽ xử lý phần còn lại.
 
 **A3 — Chỉnh RP1 (Offset) tại U1**
 
