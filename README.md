@@ -18,9 +18,8 @@ Ardu_ECU/
 │   │   ├── RPM_Sensor_20260709.net
 │   │   └── SCH_MinijetengineECU_20260709.json
 │   └── Docs/                  ← Tài liệu kỹ thuật
-│       ├── UPLOAD_AND_TEST_GUIDE.md
-│       ├── DSO152_RPM_CALIBRATION_GUIDE.md
-│       ├── PRE_ENGINE_TEST_GUIDE.md
+│       ├── COMMISSIONING_GUIDE.md   ← Hướng dẫn toàn diện: upload, hiệu chỉnh RPM,
+│       │                               Test Wizard, dry/wet-start, tăng throttle
 │       ├── CODE_ARCHITECTURE.md
 │       └── CODE_REVIEW_FINDINGS.md
 │
@@ -56,11 +55,9 @@ URL:  http://192.168.4.1
 
 | Thứ tự | File | Mục đích |
 |--------|------|---------|
-| 1 | `PROJECT_CURRENT/Docs/UPLOAD_AND_TEST_GUIDE.md` | Upload và test lần đầu |
-| 2 | `PROJECT_CURRENT/Docs/DSO152_RPM_CALIBRATION_GUIDE.md` | Hiệu chỉnh cảm biến RPM |
-| 3 | `PROJECT_CURRENT/Docs/PRE_ENGINE_TEST_GUIDE.md` | Quy trình trước khi test engine |
-| 4 | `PROJECT_CURRENT/Docs/CODE_ARCHITECTURE.md` | Hiểu sâu firmware |
-| 5 | `PROJECT_CURRENT/Docs/CODE_REVIEW_FINDINGS.md` | Các lỗi đã biết và đã fix |
+| 1 | `PROJECT_CURRENT/Docs/COMMISSIONING_GUIDE.md` | Upload, hiệu chỉnh RPM, test, dry/wet-start, tăng throttle — tất cả trong 1 file |
+| 2 | `PROJECT_CURRENT/Docs/CODE_ARCHITECTURE.md` | Hiểu sâu firmware |
+| 3 | `PROJECT_CURRENT/Docs/CODE_REVIEW_FINDINGS.md` | Các lỗi đã biết và đã fix |
 
 ---
 
@@ -96,7 +93,7 @@ URL:  http://192.168.4.1
 | MicroSD (SPI) | SPI | CS=13, SCK=14, MOSI=23, MISO=27 |
 
 **Mạch cảm biến RPM**: KMZ10A → INA826 (gain ×38) → LMV358 (op-amp trim) → LMV393 (comparator Schmitt) → GPIO33  
-Ba trimpot: RP1 (offset), RP2 (gain), RP3 (threshold). Xem `Docs/DSO152_RPM_CALIBRATION_GUIDE.md`.
+Ba trimpot: RP1 (offset), RP2 (gain), RP3 (threshold). Xem `Docs/COMMISSIONING_GUIDE.md` (Giai đoạn 2).
 
 ---
 
