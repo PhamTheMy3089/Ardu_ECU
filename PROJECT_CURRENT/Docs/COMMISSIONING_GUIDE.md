@@ -238,11 +238,14 @@ KMZ10A (U17, header 4 chân)
 
 ### 3 Trimpot
 
-| Trimpot | Giá trị | Chức năng |
-|---------|---------|----------|
-| **RP1** | 100K | OFFSET — cân bằng DC tín hiệu |
-| **RP2** | 100K | GAIN — biên độ trước comparator |
-| **RP3** | 10K | THRESHOLD — ngưỡng kích comparator |
+| Trimpot | Giá trị | Chức năng | Nếu chỉnh sai |
+|---------|---------|----------|----------|
+| **RP1** | 100K | OFFSET — dịch tâm DC của sóng, không đổi biên độ | Lệch tâm khỏi 2.5V → mất xung ở 1 trong 2 cực nam châm, RPM đọc chỉ bằng nửa thật |
+| **RP2** | 100K | GAIN — kéo giãn/co biên độ AC, không đổi tâm DC | Quá thấp → không đủ vượt ngưỡng (NO_SIGNAL); quá cao → clipping, double-pulse, RPM giả cao |
+| **RP3** | 10K | THRESHOLD — dịch ngưỡng so sánh VTH_RPM của comparator | Quá thấp → double-pulse/xung rác; quá cao → mất xung hoàn toàn |
+
+> Xem giải thích chi tiết + sơ đồ dạng sóng cho từng trimpot ở phần
+> **A3/A4/A5** bên dưới.
 
 ### Cài Đặt DSO152
 
@@ -269,17 +272,118 @@ KMZ10A (U17, header 4 chân)
 - Không thấy gì → kiểm tra khoảng cách magnet-sensor (≤3mm), thử xoay KMZ10A 90°.
 
 **A3 — Chỉnh RP1 (Offset) tại U1**
-- DC coupling, quay magnet đều ~2 vòng/giây, vặn RP1 cho đỉnh+/đỉnh− **cách đều 2.5V**.
+
+*RP1 chỉnh gì*: RP1 là trimpot hồi tiếp của tầng LMV358 Op-Amp 1 — nó
+**dịch mức DC (offset)** của tín hiệu analog lên/xuống, không ảnh hưởng
+biên độ AC. Vặn RP1 tương đương "kéo" cả sóng lên hoặc xuống theo trục
+điện áp, giữ nguyên hình dạng sóng.
+
+*Vì sao quan trọng*: Comparator (LMV393, bước A5) so sánh tín hiệu này với
+ngưỡng VTH_RPM cố định quanh 2.5V. Nếu sóng bị lệch tâm (không đối xứng
+quanh 2.5V), comparator sẽ kích **không đều giữa 2 cực nam châm** (N và S)
+— ví dụ cực N tạo xung tốt nhưng cực S không đủ vượt ngưỡng → **mất một
+nửa số xung mỗi vòng quay**, RPM đọc được chỉ bằng nửa thực tế.
+
+*Thao tác*: DC coupling tại U1, quay magnet đều ~2 vòng/giây, vặn RP1 cho
+đỉnh dương và đỉnh âm của sóng **cách đều 2.5V**.
+
+```
+RP1 lệch (offset sai):              RP1 đúng (đã chỉnh):
+    4.0V ┐ đỉnh dương                   3.5V ┐ đỉnh dương
+         │  (cách 2.5V: 1.5V)                │  (cách 2.5V: 1.0V)
+    2.5V ─┼─── VREF                     2.5V ─┼─── VREF (đúng tâm)
+         │                                     │
+    2.0V ┘ đáy                            1.5V ┘ đáy
+         (cách 2.5V: 0.5V — LỆCH!)             (cách 2.5V: 1.0V — CÂN)
+```
+
+*Kiểm tra*: ghi điện áp đỉnh+ và đỉnh−, tính hiệu với 2.5V — hai số này
+phải **bằng nhau** (sai lệch ≤0.1V là chấp nhận được).
 
 **A4 — Chỉnh RP2 (Gain) tại U1**
-- Vặn RP2 đạt biên độ **1-2Vpp**, không clipping (đỉnh phẳng → giảm RP2).
+
+*RP2 chỉnh gì*: RP2 là trimpot hồi tiếp của tầng LMV358 Op-Amp 2 — nó
+**thay đổi hệ số khuếch đại (gain)** của tín hiệu, tức là kéo giãn/co lại
+biên độ dao động AC, không dịch tâm DC (tâm vẫn giữ ở 2.5V nhờ RP1 đã
+chỉnh ở A3).
+
+*Vì sao quan trọng*: Biên độ càng lớn thì tín hiệu càng dễ vượt qua ngưỡng
+comparator (bước A5) một cách dứt khoát, có margin chống nhiễu tốt. Nhưng
+nếu khuếch đại quá mức, đỉnh sóng sẽ bị **cắt phẳng (clipping)** do vượt
+quá dải điện áp ra của op-amp — sóng vuông hóa một phần thay vì sin trơn,
+gây ra **double-pulse** (comparator kích 2 lần trên 1 đỉnh bị méo) hoặc
+đọc RPM cao giả (OVERSPEED oan).
+
+*Thao tác*: vẫn probe tại U1, quay magnet đều, vặn RP2 để đạt biên độ
+**1–2Vpp**:
+
+```
+RP2 quá thấp (<0.5Vpp):       RP2 tối ưu (1-2Vpp):        RP2 quá cao (clipping):
+   2.7V ┐ đỉnh thấp              3.5V ┐ đỉnh tròn              4.5V ┌──┐ đỉnh PHẲNG
+        │ không đủ vượt               │                              │  │ (op-amp bão hòa)
+   2.5V ─┼─                     2.5V ─┼───                     2.5V ─┼───
+        │ ngưỡng comparator           │                              │  │
+   2.3V ┘ → KHÔNG ra xung        1.5V ┘ đáy tròn               0.5V └──┘ đáy PHẲNG
+   (NO_SIGNAL dù đang quay)      (kích comparator rõ ràng)     (double-pulse, RPM giả cao)
+```
+
+*Nhận biết clipping*: đỉnh/đáy sóng "phẳng" thay vì bo tròn tự nhiên →
+**giảm RP2**. Nếu biên độ vẫn dưới 0.5Vpp dù đã vặn RP2 tối đa → kiểm tra
+lại A2 (biên độ INA_OUT quá nhỏ, có thể do magnet yếu/quá xa) trước khi
+tiếp tục chỉnh RP2.
 
 **A5 — Chỉnh RP3 (Threshold) tại U2, xác nhận xung RPM_OUT**
-- Mục tiêu: xung vuông sạch 0/5V, đúng 1 xung/cực magnet.
-- RP3 quá thấp → double-pulse (tăng RP3). RP3 quá cao → mất xung (giảm RP3).
-- **Margin**: tăng RP3 tới khi xung vừa mất → lùi lại 1/4 vòng → điểm làm việc.
-- **Test EMI**: bật starter ESC ~20%, xem RPM_OUT có spike lạ không.
-- Đọc VTH_RPM tại U21, ghi lại điện áp ngưỡng tại điểm làm việc.
+
+*RP3 chỉnh gì*: RP3 đặt điện áp **VTH_RPM** — ngưỡng so sánh (IN− của
+LMV393 comparator). Đây là "lằn ranh" điện áp: sóng analog vượt lên trên
+VTH_RPM → RPM_OUT chuyển mức cao; xuống dưới → chuyển mức thấp. RP3 không
+ảnh hưởng dạng sóng analog (đó là việc của RP1/RP2) — nó chỉ quyết định
+**tại điểm nào trên sóng thì được tính là 1 xung**.
+
+*Vì sao quan trọng*: Đây là bước quyết định trực tiếp chất lượng xung
+digital cuối cùng vào GPIO33 — mọi sai số ở RP1/RP2 trước đó cuối cùng
+đều thể hiện ra ở đây. R36 (470K) tạo **hysteresis** (độ trễ ngưỡng) cho
+comparator — nghĩa là ngưỡng bật và ngưỡng tắt lệch nhau một chút, giúp
+chống nhiễu quanh điểm ngưỡng. RP3 dịch chuyển cả cặp ngưỡng bật/tắt này
+lên xuống.
+
+*Thao tác*: probe tại U2 (TP_RPM_OUT), DC coupling, 2V/div, trigger
+Rising, quay magnet đều ~2 vòng/giây.
+
+```
+RP3 quá THẤP (ngưỡng dưới VREF quá xa):
+  ┌──┐  ┌─┐┌┐  ← double-pulse/xung rác: sóng dao động nhỏ quanh
+  │  │  │ ││ │     ngưỡng thấp cũng đủ cắt qua nhiều lần
+                → TĂNG RP3 (vặn theo chiều kim đồng hồ)
+
+RP3 ĐÚNG (1 xung sạch/vòng):
+  ┌──┐     ┌──┐
+  │  │     │  │  ← đẹp, đều, cách đều nhau — đúng 1 xung mỗi cực nam châm
+  ┘  └─────┘  └──
+
+RP3 quá CAO (ngưỡng vượt quá đỉnh sóng thật):
+  (không thấy xung nào dù magnet đang quay — sóng analog không bao giờ
+   chạm tới ngưỡng)
+       → GIẢM RP3 (vặn ngược chiều kim đồng hồ)
+```
+
+*Cách tìm điểm làm việc tối ưu (margin)*:
+1. Từ trạng thái đang có xung sạch, tiếp tục **tăng RP3** từ từ cho đến
+   khi xung **vừa biến mất hoàn toàn** → đây là biên trên
+2. **Lùi lại 1/4 vòng** (giảm RP3) từ biên trên đó → đây là điểm làm việc
+3. Margin 1/4 vòng này là vùng đệm bảo vệ khỏi **trôi ngưỡng do nhiệt độ**
+   (linh kiện analog thay đổi nhẹ theo nhiệt độ động cơ) và dao động nguồn
+   5V — nếu chỉnh sát biên, chỉ cần trôi nhẹ là mất tín hiệu giữa lúc đang
+   chạy động cơ thật
+
+*Test nhiễu EMI*: vẫn probe tại U2, bật starter ESC ở mức thấp (~20%),
+quan sát RPM_OUT có xuất hiện spike lạ không (do EMI từ ESC/dây công suất
+lan sang dây RPM). Có spike → tăng RP3 thêm ~1/8 vòng, hoặc tăng
+`rpmfilter` trong firmware (xem Giai đoạn 2B).
+
+*Đọc VTH_RPM bằng số*: chuyển probe tạm sang U21 (TP_VTH_RPM), ghi lại
+điện áp ngưỡng tại điểm làm việc tối ưu — con số này dùng để đối chiếu
+nếu sau này nghi ngờ trimpot bị trôi/lệch.
 
 **A-cuối — Xác nhận GPIO33**: cắm J_RPM_OUT1→RPM_PIN_IN1, probe GPIO33,
 kỳ vọng xung 0-3.3V (D1 TVS clamp). Nếu vẫn thấy 5V → D1 lỗi, thay ngay
