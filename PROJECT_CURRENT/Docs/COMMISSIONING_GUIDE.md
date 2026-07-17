@@ -507,6 +507,25 @@ Bỏ qua bước này nếu lần fail là do abort SỚM (`NO_STARTER_RPM`, `OV
 trước khi có nhiên liệu) — chỉ áp dụng khi đã ở stage `ST_INTRO_FUEL` trở
 lên (đã phun dầu) mà chưa đánh lửa thành công.
 
+### ⚠️ Xả nhiên liệu tồn dư trước khi thử start lại (sau NO_IGNITION / ACCEL_TO_IDLE_TIMEOUT)
+
+Theo manual EnJet E80/E100 (`REFERENCES/Documentation/Engine_Manual_E80_E100.pdf`):
+nếu lần start trước bị fail (đặc biệt `NO_IGNITION` — đã phun dầu nhưng
+không bắt lửa), nhiên liệu chưa cháy **vẫn còn đọng lại trong buồng đốt**.
+Cố start lại ngay có thể gây cháy lớn khi lượng dầu tồn dư này bắt lửa
+đột ngột cùng lúc với lần mồi mới.
+
+**Quy trình xả trước khi start lại**:
+1. Nghiêng động cơ, **đuôi (exhaust) hướng xuống dưới**
+2. Dùng `starttest <us> <ms>` (hoặc quay tay nếu có thể) để quay rotor vài
+   giây, không phun thêm nhiên liệu — mục đích thổi bay dầu tồn đọng ra
+   khỏi buồng đốt qua đuôi
+3. Sau đó mới `clearabort` và thử `startidle` lại
+
+Bỏ qua bước này nếu lần fail là do abort SỚM (`NO_STARTER_RPM`,
+`OVER_TEMP` trước khi có nhiên liệu) — chỉ áp dụng khi đã ở stage
+`ST_INTRO_FUEL` trở lên (đã phun dầu) mà chưa đánh lửa thành công.
+
 Khi vào `MODE_IDLING` ổn định vài chục giây, không dao động RPM bất
 thường → **giai đoạn wet-start thành công**.
 
