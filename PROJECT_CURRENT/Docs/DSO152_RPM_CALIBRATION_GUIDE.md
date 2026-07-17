@@ -1,9 +1,16 @@
-# Hướng Dẫn Hiệu Chỉnh Mạch RPM KMZ10A Bằng Oscilloscope DSO152
+# Hướng Dẫn Hiệu Chỉnh & Xác Nhận Cảm Biến RPM KMZ10A (DSO152 + TEST_STARTER)
 
-**Firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Cảm biến**: KMZ10A (AMR magnetoresistive)  
-**Oscilloscope**: DSO152 (1 kênh, BW ~200kHz)  
+**Firmware chính**: ECU_TestV1_EGT_DRY_START_PATCH
+**Firmware test bench**: `TEST/TEST_STARTER/TEST_STARTER.ino`
+**Cảm biến**: KMZ10A (AMR magnetoresistive)
+**Oscilloscope**: DSO152 (1 kênh, BW ~200kHz)
 **Ngày**: 2026-07-16
+
+> Tài liệu này gộp **2 giai đoạn** thành 1 quy trình liền mạch:
+> **Giai đoạn A** — chỉnh 3 trimpot bằng oscilloscope DSO152 (phần cứng analog).
+> **Giai đoạn B** — dùng firmware bench `TEST_STARTER.ino` quét toàn dải PWM
+> starter để xác nhận RPM/nhiễu/độ ổn định bằng số liệu firmware thực tế,
+> trước khi chuyển sang firmware ECU chính.
 
 ---
 
@@ -103,7 +110,7 @@ KMZ10A (U17, header 4 chân)
 
 ---
 
-## Quy Trình Hiệu Chỉnh 5 Bước
+# GIAI ĐOẠN A — Hiệu Chỉnh Analog Bằng Oscilloscope (5 Bước)
 
 ---
 
@@ -244,66 +251,172 @@ RP3 quá CAO (ngưỡng quá cao):
 - Probe tạm sang **U21 (TP_VTH_RPM)** để đọc giá trị ngưỡng bằng số
 - Ghi lại điện áp VTH_RPM tại điểm làm việc tối ưu (để tham chiếu sau)
 
----
-
-## Kiểm Tra Cuối — GPIO33 Với Firmware TEST_STARTER
-
-Sau khi 3 trimpot đã chỉnh xong:
-
-**1. Xác nhận tại GPIO33**
+**Xác nhận nhanh tại GPIO33** (trước khi sang Giai đoạn B):
 - Cắm cáp J_RPM_OUT1 → RPM_PIN_IN1 (kết nối về ECU board)
 - Probe DSO152 trực tiếp vào chân **GPIO33** của NodeMCU-32S
 - Kỳ vọng: xung **0–3.3V** (D1 TVS clamp giới hạn, không được vượt 3.3V)
-- Nếu thấy xung vẫn 5V tại GPIO33: D1 bị lỗi → thay thế ngay trước khi cấp nguồn ESP32
-
-**2. Xác nhận với firmware TEST_STARTER**
-- Upload `TEST/TEST_STARTER/TEST_STARTER.ino` vào ESP32
-- Serial Monitor 115200 baud
-- Gõ: `rpmdetail on`
-- Quay magnet bằng tay (1 vòng/giây ≈ 60 RPM)
-
-**Kỳ vọng output Serial**:
-```
-PWM=1000us(OFF) | RPM=58 (win 61) | raw=12 acc=12 rej=0 (0.0%) | jit=3.1% cv=-- | NOISE=CLEAN STAB=SETTLING
-```
-
-**Tiêu chí PASS**:
-
-| Chỉ số | Tiêu chí |
-|--------|---------|
-| RPM hiển thị | ~60 khi quay 1 vòng/giây |
-| `rejectPct` | < 5% |
-| `NOISE` | `CLEAN` |
-| RPM khi không quay | = 0 (không có false pulse) |
-
-**Nếu `rejectPct` > 10% dù đã chỉnh RP3**:
-- Tăng firmware filter: gõ `filter 200` rồi `filter 300` thử dần
-- Hoặc thêm tụ 100nF từ GPIO33 xuống GND (gần ESP32)
+- Nếu thấy xung vẫn 5V tại GPIO33: **D1 bị lỗi** → thay thế ngay trước khi
+  cấp nguồn ESP32/upload firmware bên dưới
 
 ---
 
-## Bảng Tóm Tắt Quy Trình
+# GIAI ĐOẠN B — Quét Toàn Dải PWM Bằng Firmware TEST_STARTER
+
+Sau khi 3 trimpot đã chỉnh xong bằng oscilloscope (chỉ xác nhận bằng tay
+quay ở tốc độ thấp), giai đoạn này dùng firmware bench riêng
+`TEST/TEST_STARTER/TEST_STARTER.ino` để **quét toàn dải PWM starter thật**
+và để chính firmware tự động đánh giá nhiễu/ổn định bằng số liệu, thay vì
+chỉ quan sát bằng mắt trên oscilloscope ở tốc độ tay quay chậm.
+
+## 🎯 Mục Đích
+
+- Khi khởi động: **starter KHÔNG quay** (PWM = 1000µs).
+- Tăng/giảm PWM starter bằng phím **`+`** và **`-`**.
+- ESP32 quan sát RPM tương ứng với từng mức PWM và tự đánh giá:
+  - **Nhiễu (NOISE)**: `CLEAN` / `WARN` / `NOISY` / `NO_SIGNAL`
+  - **Ổn định (STAB)**: `STABLE` / `WARN` / `UNSTABLE` / `SETTLING` / `OFF`
+
+## 🔌 Đấu Nối (chỉ 2 chân, giống mạch RPM chính)
+
+| Tín hiệu | GPIO ESP32 |
+|----------|-----------|
+| Starter ESC signal | **25** |
+| RPM sensor (từ RPM_OUT qua J_RPM_OUT1) | **33** |
+
+- GND chung giữa ESP32 ↔ ESC ↔ cảm biến.
+- Nguồn ESC/BEC **tách riêng** với nguồn ESP32 — starter cần dòng lớn
+  (xem phần nguồn/pin đã bàn riêng), không được cấp chung với 5V logic ESP32.
+
+## ⚠️ An Toàn — Bắt Buộc Trước Khi Bật Starter
+
+- **THÁO cánh/impeller** khỏi starter trước khi test — motor có thể quay nhanh.
+- Cố định starter chắc chắn xuống bàn test.
+- Đây là firmware **TEST**: không cooldown, không kiểm tra EGT, không ARM.
+  **KHÔNG** dùng để chạy động cơ có nhiên liệu.
+- Nguồn cấp cho starter phải đủ dòng (xem phần đánh giá pin/nguồn) — nguồn
+  yếu (ví dụ adapter dòng thấp) sẽ làm starter khựng/giật giật giả, dễ
+  nhầm là lỗi cảm biến RPM trong khi thực chất là thiếu dòng cấp.
+
+## 🚀 Cách Upload
+
+1. Mở `TEST/TEST_STARTER/TEST_STARTER.ino` trong Arduino IDE.
+2. Board: **ESP32 Dev Module** (hoặc NodeMCU-32S).
+3. Cần thư viện: **ESP32Servo**.
+4. Upload → Mở Serial Monitor: **115200 baud**, line ending = **Newline**.
+
+## ⌨️ Bảng Lệnh Đầy Đủ
+
+| Lệnh | Chức năng |
+|------|-----------|
+| `+` | Tăng PWM starter 1 bước (mặc định 10µs) |
+| `-` | Giảm PWM starter 1 bước |
+| `0` hoặc `s` | Dừng starter (PWM về 1000µs) |
+| `step <us>` | Đổi bước tăng/giảm (1..200) |
+| `pwm <us>` | Đặt PWM trực tiếp (1000..2000) |
+| `ppr <n>` | Số xung/vòng (1=nam châm, 2=quang học) |
+| `filter <us>` | Bộ lọc glitch RPM (20..2000), mặc định 120 |
+| `edge rising\|falling` | Cạnh kích RPM |
+| `reset` | Xóa bộ đếm & lịch sử RPM |
+| `status` | In trạng thái ngay |
+| `help` | In lại menu |
+
+> Mẹo: `+` và `-` xử lý ngay từng ký tự, có thể bấm liên tục để rà quét PWM.
+
+## 📊 Đọc Dòng Trạng Thái
+
+Ví dụ output (in 2 lần/giây):
 
 ```
-[B1] Kiểm tra nguồn: U16=5V?, U14=2.5V?
+PWM=1200us | RPM=8450 (win 8410) | raw=141 acc=141 rej=0 (0.0%) | jit=4.2% cv=1.1% | NOISE=CLEAN STAB=STABLE
+```
+
+| Trường | Ý nghĩa |
+|--------|---------|
+| `PWM` | Mức PWM starter hiện tại (µs). `(OFF)` khi = 1000µs |
+| `RPM` | RPM theo chu kỳ tức thời (phản ứng nhanh) |
+| `win` | RPM trung bình cửa sổ 100ms (chéo kiểm) |
+| `raw` | Số cạnh thô cảm biến bắt được / cửa sổ |
+| `acc` | Số xung được chấp nhận sau bộ lọc |
+| `rej` | Số xung bị lọc (nhiễu hẹp) |
+| `(%)` | Tỉ lệ xung bị lọc = `rej/raw` |
+| `jit` | Jitter chu kỳ = `(max-min)/avg` — dao động thời gian |
+| `cv` | Hệ số biến thiên RPM gần đây (stddev/mean) — độ ổn định |
+| `NOISE` | Đánh giá nhiễu tổng hợp |
+| `STAB` | Đánh giá độ ổn định tại PWM hiện tại |
+
+## 🧭 Ngưỡng Đánh Giá Tự Động
+
+**NOISE** (dựa trên rejectPct + jitter):
+
+| Kết quả | Điều kiện | Ý nghĩa |
+|---------|-----------|---------|
+| `CLEAN` | reject ≤ 5% và jit ≤ 15% | Tín hiệu tốt |
+| `WARN` | reject > 5% hoặc jit > 15% | Nhiễu nhẹ, theo dõi |
+| `NOISY` | reject > 20% hoặc jit > 40% (hoặc raw>0 mà acc=0) | Nhiễu nặng — cần sửa |
+| `NO_SIGNAL` | không có cạnh nào | Chưa nhận tín hiệu |
+
+**STAB** (dựa trên CV% của RPM, chỉ tính sau khi PWM ổn định 1.5s):
+
+| Kết quả | Điều kiện | Ý nghĩa |
+|---------|-----------|---------|
+| `STABLE` | CV ≤ 2% | RPM ổn định tốt |
+| `WARN` | 2% < CV ≤ 5% | Dao động vừa |
+| `UNSTABLE` | CV > 5% | RPM dao động mạnh |
+| `SETTLING` | mới đổi PWM / chưa đủ mẫu | Đang chờ ổn định |
+| `OFF` | PWM = 1000µs | Starter đang tắt |
+
+## 📋 Quy Trình Quét Khuyến Nghị
+
+1. **Test tĩnh (PWM=OFF)**: Quan sát 30s. Kỳ vọng `raw≈0`, `NOISE=NO_SIGNAL`.
+   Nếu có `acc>0` khi starter chưa quay → có nhiễu nền, kiểm tra wiring/RP3
+   trước khi quét tiếp (quay lại Giai đoạn A, Bước 5).
+2. **Rà quét lên**: Bấm `+` từ từ (ví dụ mỗi lần +10µs từ 1100µs).
+   Sau mỗi bước, chờ `STAB` chuyển từ `SETTLING` → xem `NOISE`/`STAB`.
+3. **Ghi lại bảng** PWM → RPM → NOISE → STAB ở nhiều mức (dùng bảng ghi
+   chú ở cuối tài liệu).
+4. **Nếu `NOISY` ở PWM cao**: tăng filter (`filter 300`), thêm tụ 100nF tại
+   GPIO33, tách dây tín hiệu RPM xa dây công suất ESC. Nếu vẫn không hết,
+   quay lại Giai đoạn A và tăng thêm margin RP3.
+5. **Kết luận GO/NO-GO**: Toàn dải làm việc nên đạt `NOISE=CLEAN` và
+   `STAB=STABLE` trước khi chuyển sang firmware ECU chính
+   (`ECU_TestV1_EGT_DRY_START_PATCH.ino`).
+
+---
+
+## Bảng Tóm Tắt Toàn Bộ Quy Trình (A + B)
+
+```
+GIAI ĐOẠN A — Oscilloscope DSO152
+[A1] Kiểm tra nguồn: U16=5V?, U14=2.5V?
       ↓ PASS
-[B2] INA_OUT (U3, AC coupling): thấy sóng sin khi quay magnet?
+[A2] INA_OUT (U3, AC coupling): thấy sóng sin khi quay magnet?
       ↓ PASS (biên độ >100mVpp)
-[B3] Chỉnh RP1 (offset): LMV358_OUT (U1, DC) đối xứng quanh 2.5V
+[A3] Chỉnh RP1 (offset): LMV358_OUT (U1, DC) đối xứng quanh 2.5V
       ↓ Đỉnh+ và đỉnh− cách đều 2.5V
-[B4] Chỉnh RP2 (gain): LMV358_OUT (U1) biên độ 1–2Vpp, không clipping
+[A4] Chỉnh RP2 (gain): LMV358_OUT (U1) biên độ 1–2Vpp, không clipping
       ↓ OK
-[B5] Chỉnh RP3 (threshold): RPM_OUT (U2) = xung vuông sạch 0/5V
-     + Thêm margin 1/4 vòng
-     + Test EMI với starter bật
+[A5] Chỉnh RP3 (threshold): RPM_OUT (U2) = xung vuông sạch 0/5V
+     + Thêm margin 1/4 vòng + Test EMI với starter bật
       ↓ OK
-[Cuối] GPIO33 = 0–3.3V?, TEST_STARTER NOISE=CLEAN rejectPct<5%?
-      ↓ PASS → SẴN SÀNG TEST ENGINE
+[A-cuối] GPIO33 = 0–3.3V (D1 clamp đúng)?
+      ↓ PASS
+
+GIAI ĐOẠN B — Firmware TEST_STARTER (quét toàn dải PWM thật)
+[B1] Test tĩnh PWM=OFF: raw≈0, NOISE=NO_SIGNAL?
+      ↓ PASS
+[B2] Rà quét PWM tăng dần bằng phím +, ghi bảng PWM→RPM→NOISE→STAB
+      ↓ Toàn dải NOISE=CLEAN, STAB=STABLE
+[B3] Test EMI: bật starter, kiểm tra spike trên RPM_OUT/GPIO33
+      ↓ Không spike bất thường
+      ↓ PASS → SẴN SÀNG chuyển sang firmware ECU chính, tiếp tục
+              PRE_ENGINE_TEST_GUIDE.md / COMMISSIONING_GUIDE.md
 ```
 
 ---
 
 ## Ghi Chú Kết Quả Hiệu Chỉnh
+
+### Giai đoạn A — Trimpot
 
 ```
 Ngày hiệu chỉnh: _______________
@@ -327,10 +440,26 @@ Bước 5 (RP3 Threshold):
   VTH_RPM điểm làm việc (−1/4 vòng) = _____ V
   EMI test (starter 20%): spike? ☐Có ☐Không  ☐ OK
 
-Kiểm tra cuối:
+Kiểm tra cuối Giai đoạn A:
   GPIO33 max = _____ V (phải ≤ 3.3V)  ☐ OK
-  TEST_STARTER rejectPct = _____ %  ☐ OK (< 5%)
-  RPM khi quay 1 vòng/s = _____ (phải ≈ 60)  ☐ OK
+```
+
+### Giai đoạn B — Quét PWM bằng TEST_STARTER
+
+Ghi lại nhiều mức PWM trong dải làm việc thực tế của starter:
+
+| PWM (µs) | RPM | raw | acc | rej% | jit% | cv% | NOISE | STAB |
+|----------|-----|-----|-----|------|------|-----|-------|------|
+| 1000 (OFF) | | | | | | | | |
+| 1100 | | | | | | | | |
+| 1150 | | | | | | | | |
+| 1200 | | | | | | | | |
+| 1250 | | | | | | | | |
+| ___ | | | | | | | | |
+
+```
+RPM khi quay tay 1 vòng/s (ppr=1) ≈ 60?  ☐ OK
+EMI test lúc starter chạy: spike trên RPM_OUT/GPIO33?  ☐Có ☐Không  ☐ OK
 
 Kết luận: ☐ PASS — Sẵn sàng test engine  ☐ FAIL — Xem ghi chú:
 _________________________________________________
@@ -340,7 +469,9 @@ _________________________________________________
 
 **Tài liệu liên quan**:
 - `PRE_ENGINE_TEST_GUIDE.md` — Quy trình test tổng thể trước khi test engine
-- `TEST/TEST_STARTER/TEST_STARTER.ino` — Firmware test RPM bench
-- `CODE_REVIEW_FINDINGS.md` — Phân tích firmware
+- `COMMISSIONING_GUIDE.md` — Quy trình từ test cơ bản tới chạy thật có throttle
+- `TEST/TEST_STARTER/TEST_STARTER.ino` — Firmware test RPM + starter bench
+  (đã gộp đầy đủ cách dùng vào Giai đoạn B ở trên)
+- `CODE_REVIEW_FINDINGS.md` — Phân tích firmware ECU chính
 
-**Phiên bản**: 1.0 — 2026-07-16
+**Phiên bản**: 2.0 — 2026-07-16 (gộp TEST_STARTER vào quy trình DSO152)

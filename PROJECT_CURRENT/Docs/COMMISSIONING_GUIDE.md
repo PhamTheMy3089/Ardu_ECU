@@ -39,9 +39,12 @@ khi chạm vào bất kỳ thứ gì có chuyển động.
 
 ## Giai đoạn 2 — DSO152 chỉnh cảm biến RPM (KMZ10A)
 
-Theo `DSO152_RPM_CALIBRATION_GUIDE.md` đầy đủ 5 bước (RP1 offset, RP2 gain,
-RP3 threshold). **Không bỏ qua giai đoạn này** — RPM sai sẽ làm mọi guard
-an toàn phía sau (OVERSPEED, RPM_SIGNAL_LOST, FLAMEOUT) hoạt động sai.
+Theo `DSO152_RPM_CALIBRATION_GUIDE.md` — **Giai đoạn A** (5 bước chỉnh
+trimpot RP1 offset/RP2 gain/RP3 threshold bằng oscilloscope) + **Giai đoạn
+B** (quét toàn dải PWM starter bằng firmware bench `TEST/TEST_STARTER/`,
+tự động đánh giá NOISE/STAB). **Không bỏ qua giai đoạn này** — RPM sai sẽ
+làm mọi guard an toàn phía sau (OVERSPEED, RPM_SIGNAL_LOST, FLAMEOUT) hoạt
+động sai.
 
 Xác nhận cuối:
 ```
