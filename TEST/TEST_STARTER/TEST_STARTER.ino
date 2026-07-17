@@ -26,6 +26,10 @@
   Serial Monitor: 115200 baud, line ending = Newline (hoặc No line ending
                   cũng được vì '+'/'-' xử lý ngay từng ký tự).
 
+  Web UI (tùy chọn, không cần Serial Monitor): SoftAP SSID "TEST_STARTER",
+  password "test1234", http://192.168.4.1 — cùng bộ lệnh, điều khiển bằng
+  nút bấm/ô nhập trên trình duyệt điện thoại/laptop.
+
   LỆNH:
     +           Tăng PWM starter 1 bước (mặc định 10us)
     -           Giảm PWM starter 1 bước
@@ -35,14 +39,40 @@
     ppr <n>     Số xung / vòng (1=nam châm, 2=quang học...) mặc định 1
     filter <us> Bộ lọc glitch RPM (20..2000us) mặc định 120us
     edge rising|falling   Cạnh kích RPM, mặc định rising
+    kickus <us> Mức PWM kick lúc bắt đầu từ OFF (1000..2000us) mặc định 1300
+    kickms <ms> Thời gian giữ kick trước khi hạ về PWM ổn định (0..2000ms,
+                mặc định 300ms, 0=tắt kick)
     reset       Xóa bộ đếm & lịch sử RPM
     status      In trạng thái ngay
     help        In lại danh sách lệnh
+
+  Kick: khi PWM chuyển từ OFF (<=1000us) lên bất kỳ giá trị >1000us, starter
+  được cấp kickUs trong kickMs trước rồi mới hạ về đúng mức PWM đã yêu cầu.
+  Giúp starter có cơ cấu Bendix/clutch ăn khớp dứt khoát thay vì trượt/khựng.
   ============================================================================
 */
 
 #include <Arduino.h>
-#include <ESP32Servo.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#if __has_include(<esp_arduino_version.h>)
+  #include <esp_arduino_version.h>
+#endif
+#ifndef ESP_ARDUINO_VERSION_MAJOR
+  #define ESP_ARDUINO_VERSION_MAJOR 2
+#endif
+
+// ---------------- Web UI (optional, alongside Serial) ----------------
+static const char* WEB_SSID = "TEST_STARTER";
+static const char* WEB_PASS = "test1234";
+WebServer server(80);
+
+// ESC PWM is driven directly through the ESP32 LEDC peripheral instead of the
+// ESP32Servo library. ESP32Servo's internal timer/LEDC setup was found to
+// produce an unstable pulse on some ESP32 Arduino core versions (core 3.x
+// changed the LEDC API), which the ESC reads as noisy/invalid throttle and
+// responds to by stuttering/cutting the motor - independent of supply
+// current. See CLAUDE.md at the repo root for the full writeup.
 
 // ---------------- Pins ----------------
 #define PIN_ESC_START   25
@@ -52,6 +82,32 @@
 static const int ESC_SAFE_US = 1000;   // starter KHÔNG quay
 static const int ESC_MIN_US  = 1000;
 static const int ESC_MAX_US  = 2000;
+
+// ---------------- ESC PWM via raw LEDC ----------------
+static const int ESC_PWM_FREQ_HZ = 50;
+static const int ESC_PWM_RES_BITS = 16;
+static const int LEDC_CH_START = 1;
+
+void escAttach(uint8_t pin, int legacyChannel) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  (void)legacyChannel;
+  ledcAttach(pin, ESC_PWM_FREQ_HZ, ESC_PWM_RES_BITS);
+#else
+  ledcSetup(legacyChannel, ESC_PWM_FREQ_HZ, ESC_PWM_RES_BITS);
+  ledcAttachPin(pin, legacyChannel);
+#endif
+}
+
+void escWriteUs(uint8_t pin, int legacyChannel, int us) {
+  const uint32_t maxDuty = (1UL << ESC_PWM_RES_BITS) - 1;
+  uint32_t duty = (uint64_t)us * maxDuty / 20000UL; // 20ms period at 50Hz
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(pin, duty);
+#else
+  (void)pin;
+  ledcWrite(legacyChannel, duty);
+#endif
+}
 
 // ---------------- Timing ----------------
 static const uint32_t RPM_SAMPLE_MS    = 100;   // cửa sổ tính RPM
@@ -63,6 +119,13 @@ static const uint32_t SETTLE_MS        = 1500;  // thời gian chờ ổn địn
 int      pwmUs        = ESC_SAFE_US;   // PWM starter hiện tại (bắt đầu = không quay)
 int      pwmStepUs    = 10;            // bước +/-
 int      pulsesPerRev = 1;             // xung / vòng
+
+// ---------------- Kick (brief high pulse when starting from OFF) ----------------
+// Helps a starter with a Bendix/clutch mechanism engage decisively instead of
+// slipping/stalling, mirroring the main ECU firmware's starterKickUs/Ms.
+int      kickUs       = 1300;
+uint32_t kickMs        = 300;   // 0 disables the kick
+uint32_t kickUntilMs   = 0;     // 0 = not currently in the kick window
 volatile uint32_t rpmMinPulseUs = 120; // bộ lọc glitch phần cứng
 int      rpmEdgeMode  = RISING;
 
@@ -99,8 +162,6 @@ uint32_t pwmChangedAtMs = 0;   // để tính "settling" sau khi đổi PWM
 
 // ---------------- Serial input ----------------
 String   cmdBuf = "";
-
-Servo escStart;
 
 // ============================================================================
 //  RPM measurement
@@ -272,14 +333,23 @@ const char* stabilityVerdict() {
 // ============================================================================
 //  Output control
 // ============================================================================
+// Called every loop() (not just on change) so a timed kick decays into the
+// steady pwmUs automatically once kickUntilMs passes, without needing
+// another command.
 void applyPwm() {
-  pwmUs = constrain(pwmUs, ESC_MIN_US, ESC_MAX_US);
-  escStart.writeMicroseconds(pwmUs);
+  int outputUs = (kickUntilMs != 0 && millis() < kickUntilMs) ? kickUs : pwmUs;
+  escWriteUs(PIN_ESC_START, LEDC_CH_START, outputUs);
 }
 
 void setPwm(int us, bool markChange) {
   int old = pwmUs;
-  pwmUs = constrain(us, ESC_MIN_US, ESC_MAX_US);
+  int newUs = constrain(us, ESC_MIN_US, ESC_MAX_US);
+  if (newUs <= ESC_SAFE_US) {
+    kickUntilMs = 0;   // stopping always takes effect immediately, never overridden by a stale kick
+  } else if (old <= ESC_SAFE_US && kickMs > 0) {
+    kickUntilMs = millis() + kickMs;   // starting from OFF: arm the kick
+  }
+  pwmUs = newUs;
   applyPwm();
   if (markChange && pwmUs != old) {
     pwmChangedAtMs = millis();
@@ -295,6 +365,7 @@ void printStatus() {
   float cv = rpmCvPct();
   Serial.print("PWM=");    Serial.print(pwmUs);      Serial.print("us");
   if (pwmUs <= ESC_SAFE_US) Serial.print("(OFF)");
+  if (kickUntilMs != 0 && millis() < kickUntilMs) Serial.print("(KICK)");
   Serial.print(" | RPM="); Serial.print(rpm.rpm, 0);
   Serial.print(" (win ");  Serial.print(rpm.rpmWindow, 0); Serial.print(")");
   Serial.print(" | raw="); Serial.print(rpm.raw);
@@ -319,13 +390,17 @@ void printHelp() {
   Serial.println("  ppr <n>     xung/vong (mac dinh 1)");
   Serial.println("  filter <us> bo loc glitch RPM (20..2000)");
   Serial.println("  edge rising|falling   canh kich RPM");
+  Serial.println("  kickus <us> muc PWM kick luc bat dau tu OFF (1000..2000, mac dinh 1300)");
+  Serial.println("  kickms <ms> thoi gian kick truoc khi ha ve pwm on dinh (0..2000, 0=tat)");
   Serial.println("  reset       xoa bo dem RPM");
   Serial.println("  status      in trang thai ngay");
   Serial.println("  help        in menu nay");
   Serial.print  ("  hien tai: step="); Serial.print(pwmStepUs);
   Serial.print  ("us ppr=");           Serial.print(pulsesPerRev);
   Serial.print  (" filter=");          Serial.print((uint32_t)rpmMinPulseUs);
-  Serial.print  ("us edge=");          Serial.println(rpmEdgeMode == FALLING ? "FALLING" : "RISING");
+  Serial.print  ("us edge=");          Serial.print(rpmEdgeMode == FALLING ? "FALLING" : "RISING");
+  Serial.print  (" kickUs=");          Serial.print(kickUs);
+  Serial.print  ("us kickMs=");        Serial.println(kickMs);
   Serial.println("==================================================");
   Serial.println();
 }
@@ -375,8 +450,31 @@ void handleWordCommand(String cmd) {
   }
   if (cmd == "edge rising")  { rpmEdgeMode = RISING;  reattachRpm(); resetRpmStats(); Serial.println("edge=RISING");  return; }
   if (cmd == "edge falling") { rpmEdgeMode = FALLING; reattachRpm(); resetRpmStats(); Serial.println("edge=FALLING"); return; }
+  if (cmd.startsWith("kickus")) {
+    long v = numberAfter(cmd, "kickus");
+    if (v >= ESC_MIN_US && v <= ESC_MAX_US) { kickUs = (int)v; Serial.print("kickUs="); Serial.print(kickUs); Serial.println("us"); }
+    else Serial.println("ERROR: kickus 1000..2000");
+    return;
+  }
+  if (cmd.startsWith("kickms")) {
+    long v = numberAfter(cmd, "kickms");
+    if (v >= 0 && v <= 2000) { kickMs = (uint32_t)v; Serial.print("kickMs="); Serial.print(kickMs); Serial.println("ms (0=disabled)"); }
+    else Serial.println("ERROR: kickms 0..2000");
+    return;
+  }
 
   Serial.print("Unknown cmd: "); Serial.println(cmd);
+}
+
+// Entry point shared by the Web UI /cmd endpoint (and reusable by Serial):
+// handles the '+'/'-' shortcuts too, then falls through to handleWordCommand()
+// for everything else. Serial typing still uses its own fast per-character
+// path in handleSerial() below so held-down keys keep responding instantly.
+void handleCommand(String cmd) {
+  cmd.trim();
+  if (cmd == "+") { setPwm(pwmUs + pwmStepUs, true); Serial.print("PWM="); Serial.print(pwmUs); Serial.println("us (+)"); return; }
+  if (cmd == "-") { setPwm(pwmUs - pwmStepUs, true); Serial.print("PWM="); Serial.print(pwmUs); Serial.println("us (-)"); return; }
+  handleWordCommand(cmd);
 }
 
 // Đọc Serial không blocking. '+' và '-' xử lý ngay từng ký tự (bấm liên tục được).
@@ -396,6 +494,85 @@ void handleSerial() {
 }
 
 // ============================================================================
+//  Web UI (optional alternative to Serial Monitor)
+// ============================================================================
+String webStatusJson() {
+  float cv = rpmCvPct();
+  String s;
+  s.reserve(384);
+  s = "{";
+  s += "\"pwm\":\"" + String(pwmUs) + (pwmUs <= ESC_SAFE_US ? " (OFF)" : "") + "\",";
+  s += "\"kick\":\"" + String((kickUntilMs != 0 && millis() < kickUntilMs) ? "ON" : "off") + "\",";
+  s += "\"rpm\":\"" + String(rpm.rpm, 0) + "\",";
+  s += "\"rpmWindow\":\"" + String(rpm.rpmWindow, 0) + "\",";
+  s += "\"raw\":\"" + String(rpm.raw) + "\",";
+  s += "\"accepted\":\"" + String(rpm.accepted) + "\",";
+  s += "\"rejected\":\"" + String(rpm.rejected) + "\",";
+  s += "\"rejectPct\":\"" + String(rpm.rejectPct, 1) + "\",";
+  s += "\"jitterPct\":\"" + String(rpm.jitterPct, 1) + "\",";
+  s += "\"cv\":\"" + String(cv < 0 ? String("--") : String(cv, 1)) + "\",";
+  s += "\"noise\":\"" + String(noiseVerdict()) + "\",";
+  s += "\"stab\":\"" + String(stabilityVerdict()) + "\",";
+  s += "\"step\":\"" + String(pwmStepUs) + "\",";
+  s += "\"ppr\":\"" + String(pulsesPerRev) + "\",";
+  s += "\"filter\":\"" + String((uint32_t)rpmMinPulseUs) + "\",";
+  s += "\"edge\":\"" + String(rpmEdgeMode == FALLING ? "FALLING" : "RISING") + "\",";
+  s += "\"kickUs\":\"" + String(kickUs) + "\",";
+  s += "\"kickMs\":\"" + String(kickMs) + "\"";
+  s += "}";
+  return s;
+}
+
+String htmlPage() {
+  return String(R"HTML(
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TEST_STARTER</title>
+<style>
+body{margin:0;background:#0b1020;color:#e9eefc;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:900px;margin:auto;padding:16px}
+h1{margin:8px 0 4px;font-size:22px}.sub{color:#9fb0d0;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.card{background:#151d33;border:1px solid #283451;border-radius:14px;padding:12px}.label{color:#9fb0d0;font-size:12px;text-transform:uppercase}.val{font-size:20px;font-weight:700;margin-top:4px}
+.btns{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.btn{border:0;border-radius:10px;padding:10px 12px;background:#293855;color:#fff;font-weight:700}.danger{background:#8a2430}.go{background:#1e7042}
+input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;padding:8px;width:80px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+</style></head><body><div class="wrap">
+<h1>TEST_STARTER bench</h1><div class="sub">SoftAP TEST_STARTER / test1234 — http://192.168.4.1 — THAO canh/impeller truoc khi test</div>
+<div class="grid" id="cards"></div>
+<h2>Starter</h2><div class="btns">
+<button class="btn go" onclick="cmd('+')">+ step</button><button class="btn" onclick="cmd('-')">- step</button><button class="btn danger" onclick="cmd('0')">STOP</button>
+</div>
+<div class="row">PWM us <input id="pwm" value="1150"><button class="btn" onclick="cmd('pwm '+v('pwm'))">Set PWM</button></div>
+<div class="row">Step us <input id="step" value="10"><button class="btn" onclick="cmd('step '+v('step'))">Set step</button></div>
+<h2>Kick</h2><div class="row">
+Kick us <input id="kus" value="1300"><button class="btn" onclick="cmd('kickus '+v('kus'))">Set</button>
+Kick ms <input id="kms" value="300"><button class="btn" onclick="cmd('kickms '+v('kms'))">Set</button>
+</div>
+<h2>RPM sensor</h2><div class="row">
+Filter us <input id="filt" value="120"><button class="btn" onclick="cmd('filter '+v('filt'))">Set</button>
+PPR <input id="ppr" value="1"><button class="btn" onclick="cmd('ppr '+v('ppr'))">Set</button>
+<button class="btn" onclick="cmd('edge rising')">Edge Rising</button><button class="btn" onclick="cmd('edge falling')">Edge Falling</button>
+<button class="btn" onclick="cmd('reset')">Reset RPM stats</button>
+</div>
+</div><script>
+function v(id){return document.getElementById(id).value}
+function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,200))}
+function load(){fetch('/api').then(r=>r.json()).then(d=>{let cards=[['PWM',d.pwm],['KICK',d.kick],['RPM',d.rpm],['RPM win',d.rpmWindow],['raw',d.raw],['acc',d.accepted],['rej',d.rejected],['rej%',d.rejectPct],['jit%',d.jitterPct],['cv%',d.cv],['NOISE',d.noise],['STAB',d.stab],['step',d.step],['ppr',d.ppr],['filter',d.filter],['edge',d.edge],['kickUs',d.kickUs],['kickMs',d.kickMs]];
+ document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');});}
+setInterval(load,700);load();
+</script></body></html>
+)HTML");
+}
+
+void setupWebServer() {
+  server.on("/", []() { server.send(200, "text/html", htmlPage()); });
+  server.on("/api", []() { server.send(200, "application/json", webStatusJson()); });
+  server.on("/cmd", []() {
+    String c = server.hasArg("c") ? server.arg("c") : "";
+    if (c.length()) handleCommand(c);
+    server.send(200, "text/plain", "OK");
+  });
+  server.begin();
+}
+
+// ============================================================================
 //  Setup / Loop
 // ============================================================================
 void setup() {
@@ -403,17 +580,21 @@ void setup() {
   delay(200);
 
   // ESC starter: arm ở 1000us (KHÔNG quay) ngay từ đầu.
-  escStart.setPeriodHertz(50);
-  escStart.attach(PIN_ESC_START, ESC_MIN_US, ESC_MAX_US);
+  escAttach(PIN_ESC_START, LEDC_CH_START);
   pwmUs = ESC_SAFE_US;
   applyPwm();
 
   attachRpm();
   resetRpmStats();
 
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(WEB_SSID, WEB_PASS);
+  setupWebServer();
+
   Serial.println();
   Serial.println("TEST_STARTER booted. Starter DISARMED at 1000us (khong quay).");
   Serial.println("Dung '+' / '-' de tang/giam PWM. Go 'help' de xem menu.");
+  Serial.print("Web UI: SSID="); Serial.print(WEB_SSID); Serial.println(" PASS=test1234 URL=http://192.168.4.1");
   printHelp();
 
   delay(2000);   // giữ 1000us đủ lâu để ESC arm an toàn
@@ -424,7 +605,9 @@ uint32_t lastStatusMs = 0;
 
 void loop() {
   handleSerial();
+  server.handleClient();
   updateRpm();
+  applyPwm();   // re-apply every loop so a timed kick decays into steady pwmUs on its own
 
   uint32_t nowMs = millis();
   if (nowMs - lastStatusMs >= STATUS_PRINT_MS) {

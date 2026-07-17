@@ -42,8 +42,9 @@
 ### Software
 - [ ] Arduino IDE 1.8.19+ hoặc 2.x
 - [ ] ESP32 Board Support Package
-- [ ] Library: **Adafruit MAX31855**, **ESP32Servo**
-  (không cần ArduinoJson — firmware hiện tại không dùng thư viện này)
+- [ ] Library: **Adafruit MAX31855**
+  (không cần ArduinoJson hay ESP32Servo — firmware dùng LEDC PWM trực tiếp
+  cho ESC, xem `CLAUDE.md` ở gốc repo)
 
 ---
 
@@ -64,7 +65,9 @@
 | Library | Tác giả |
 |---------|---------|
 | Adafruit MAX31855 | Adafruit Industries |
-| ESP32Servo | John K. Bennett |
+
+> Không cần cài ESP32Servo — ESC (pump/starter) dùng LEDC PWM có sẵn trong
+> ESP32 Arduino core. Xem `CLAUDE.md` ở gốc repo.
 
 ### Bước 4: Cấu Hình Board & Upload
 ```
@@ -441,7 +444,12 @@ quan sát bằng tay quay chậm trên oscilloscope.
 tách riêng nguồn ESP32, đủ dòng (xem phần Nguồn & Pin).
 
 **Upload**: mở `TEST/TEST_STARTER/TEST_STARTER.ino`, board ESP32 Dev Module,
-cần lib ESP32Servo, Serial Monitor 115200/Newline.
+không cần lib ngoài (LEDC PWM có sẵn trong core).
+
+**Test qua Serial HOẶC qua Web** (không bắt buộc phải dùng Serial Monitor):
+- Serial: 115200 baud, Newline
+- Web: SoftAP **TEST_STARTER** / pass **test1234** → `http://192.168.4.1` —
+  cùng bộ lệnh qua nút bấm/ô nhập, tiện khi test bằng điện thoại
 
 **Bảng lệnh**:
 
@@ -454,8 +462,19 @@ cần lib ESP32Servo, Serial Monitor 115200/Newline.
 | `ppr <n>` | Số xung/vòng (1=nam châm, 2=quang học) |
 | `filter <us>` | Bộ lọc glitch RPM (20..2000), mặc định 120 |
 | `edge rising\|falling` | Cạnh kích RPM |
+| `kickus <us>` | Mức PWM kick lúc bắt đầu từ OFF (1000..2000), mặc định 1300 |
+| `kickms <ms>` | Thời gian giữ kick trước khi hạ về PWM ổn định (0..2000, 0=tắt) |
 | `reset` | Xóa bộ đếm & lịch sử RPM |
 | `status` / `help` | In trạng thái / menu lệnh |
+
+> **Kick**: khi PWM chuyển từ OFF lên bất kỳ giá trị >1000µs, starter được cấp
+> `kickUs` trong `kickMs` trước rồi mới hạ về mức PWM đã yêu cầu — giúp starter
+> có cơ cấu Bendix/clutch ăn khớp dứt khoát thay vì trượt/khựng. Firmware ECU
+> chính có tính năng tương đương qua `set starterkickus`/`set starterkickms`
+> (áp dụng ở đầu giai đoạn `ST_PURGE`) — cũng chỉnh được từ Web UI dashboard
+> chính (mục "Starter Kick"), không bắt buộc phải dùng Serial. Mục
+> "Starter Manual Test" trên cùng dashboard cho phép chạy `starttest <us> <ms>`
+> trực tiếp từ trình duyệt (cần `arm2` trước, có nút riêng).
 
 **Đọc dòng trạng thái** (in 2 lần/giây):
 ```

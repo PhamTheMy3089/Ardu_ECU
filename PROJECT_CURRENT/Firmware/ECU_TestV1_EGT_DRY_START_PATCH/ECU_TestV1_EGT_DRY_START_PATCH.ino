@@ -42,11 +42,23 @@
 #include <SPI.h>
 #include <SD.h>
 #include <math.h>
-#include <ESP32Servo.h>
+#if __has_include(<esp_arduino_version.h>)
+  #include <esp_arduino_version.h>
+#endif
+#ifndef ESP_ARDUINO_VERSION_MAJOR
+  #define ESP_ARDUINO_VERSION_MAJOR 2
+#endif
 #include <Adafruit_MAX31855.h>
 #include <WiFi.h>
 #include <WebServer.h>
 
+// ESC PWM is driven directly through the ESP32 LEDC peripheral instead of the
+// ESP32Servo library. ESP32Servo's internal timer/LEDC setup has been observed
+// to produce an unstable pulse on some ESP32 Arduino core versions (core 3.x
+// changed the LEDC API), which an ESC reads as noisy/invalid throttle and
+// responds to by stuttering/cutting the motor - independent of supply current.
+// Raw LEDC removes that dependency and matches the exact API of the installed
+// core.
 #define PIN_EGT_CLK    18
 #define PIN_EGT_CS      5
 #define PIN_EGT_DO     19
@@ -69,6 +81,36 @@ static const bool VALVE_ACTIVE_HIGH = true;
 static const int ESC_SAFE_US = 1000;
 static const int ESC_MIN_US  = 1000;
 static const int ESC_MAX_US  = 2000;
+
+// ---- ESC PWM via raw LEDC (see include-block comment above) ----
+static const int ESC_PWM_FREQ_HZ = 50;
+static const int ESC_PWM_RES_BITS = 16;
+// legacyChannel is only read on core <3 (ledcWrite(channel, ...)); on core >=3
+// ledcWrite() takes the pin directly, so these are unused there but still
+// need to exist so the call sites below compile under both cores.
+static const int LEDC_CH_PUMP  = 0;
+static const int LEDC_CH_START = 1;
+
+void escAttach(uint8_t pin, int legacyChannel) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  (void)legacyChannel;
+  ledcAttach(pin, ESC_PWM_FREQ_HZ, ESC_PWM_RES_BITS);
+#else
+  ledcSetup(legacyChannel, ESC_PWM_FREQ_HZ, ESC_PWM_RES_BITS);
+  ledcAttachPin(pin, legacyChannel);
+#endif
+}
+
+void escWriteUs(uint8_t pin, int legacyChannel, int us) {
+  const uint32_t maxDuty = (1UL << ESC_PWM_RES_BITS) - 1;
+  uint32_t duty = (uint64_t)us * maxDuty / 20000UL; // 20ms period at 50Hz
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(pin, duty);
+#else
+  (void)pin;
+  ledcWrite(legacyChannel, duty);
+#endif
+}
 static const uint32_t RPM_SAMPLE_MS = 100;
 static const uint32_t RPM_SIGNAL_TIMEOUT_MS = 1000;
 // RPM guard: while ECU is WAITING and every output is OFF, any isolated RPM edge is treated as noise.
@@ -168,6 +210,14 @@ struct Config {
   int starterSpinUs = 1150;
   int starterAssistUs = 1200;
 
+  // Brief high-PWM pulse at the very start of ST_PURGE, before settling to
+  // starterPurgeUs. Helps a starter with a Bendix/clutch mechanism engage
+  // decisively (static friction / clutch pop-out needs more torque than
+  // sustained cranking does), rather than starting soft and risking a
+  // slipping clutch or stall.
+  int starterKickUs = 1300;
+  uint32_t starterKickMs = 300;
+
   int introFuelUs = 1160;       // ~50 ml/min
   int idleFuelUs = 1175;        // ~80 ml/min preview
   int maxFuelUs = 1260;         // ~280 ml/min preview
@@ -193,7 +243,6 @@ String lastAbortReason = "NONE";
 String serialCmdBuf = "";  // non-blocking serial command accumulator
 int throttlePct = 0;
 
-Servo escPump, escStart;
 Adafruit_MAX31855 thermo(PIN_EGT_CLK, PIN_EGT_CS, PIN_EGT_DO);
 
 void IRAM_ATTR rpmISR();
@@ -451,8 +500,8 @@ int usFromFlow(float mlMin) {
 void applyOutputs() {
   pumpUs = constrain(pumpUs, ESC_MIN_US, ESC_MAX_US);
   startUs = constrain(startUs, ESC_MIN_US, ESC_MAX_US);
-  escPump.writeMicroseconds(pumpUs);
-  escStart.writeMicroseconds(startUs);
+  escWriteUs(PIN_ESC_PUMP, LEDC_CH_PUMP, pumpUs);
+  escWriteUs(PIN_ESC_START, LEDC_CH_START, startUs);
   writeActiveDigital(PIN_IGN, ignCmd, IGN_ACTIVE_HIGH);
   writeActiveDigital(PIN_VALVE_1, valve1Cmd, VALVE_ACTIVE_HIGH);
   writeActiveDigital(PIN_VALVE_2, valve2Cmd, VALVE_ACTIVE_HIGH);
@@ -1485,6 +1534,15 @@ Max RPM <input id="maxrpm" value="110000"><button class="btn" onclick="cmd('set 
 Max EGT <input id="maxegt" value="780"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
 Throttle <input id="thr" value="0"><button class="btn" onclick="cmd('set throttle '+v('thr'))">Set</button>
 </div>
+<h2>Starter Kick (bench, WAITING/ABORTED only)</h2><div class="row small">
+Kick us <input id="kus" value="1300"><button class="btn" onclick="cmd('set starterkickus '+v('kus'))">Set</button>
+Kick ms <input id="kms" value="300"><button class="btn" onclick="cmd('set starterkickms '+v('kms'))">Set</button>
+</div>
+<h2>Starter Manual Test (no fuel/ign, bench only)</h2><div class="row small">
+PWM us <input id="sus" value="1150"> Duration ms <input id="sms" value="3000">
+<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
+<button class="btn test" onclick="cmd('starttest '+v('sus')+' '+v('sms'))">Run</button>
+</div>
 <h2>Event Log</h2><div class="log" id="logs"></div>
 </div><script>
 function v(id){return document.getElementById(id).value}
@@ -1592,6 +1650,13 @@ void beginAutoIdle() {
   }
 }
 
+// During the first cfg.starterKickMs of a stage, use the stronger kick pulse
+// instead of the steady value, to help a Bendix/clutch mechanism engage
+// decisively before settling to the gentler cranking speed.
+int starterKickOrSteady(int steadyUs) {
+  return (millis() - stageEnteredMs < cfg.starterKickMs) ? cfg.starterKickUs : steadyUs;
+}
+
 void updateDryStarting() {
   // Dry starter/RPM test used only when EGT is OPEN/faulty.
   // Fuel, valves and igniter are deliberately forced OFF on every loop.
@@ -1603,7 +1668,7 @@ void updateDryStarting() {
 
   switch (startStage) {
     case ST_PURGE:
-      startUs = cfg.starterPurgeUs;
+      startUs = starterKickOrSteady(cfg.starterPurgeUs);
       if (millis() - stageEnteredMs >= cfg.purgeTimeMs) {
         resetRpmStats();
         enterStage(ST_SPINUP_PREHEAT);
@@ -1661,7 +1726,7 @@ void updateStarting() {
   }
   switch (startStage) {
     case ST_PURGE:
-      startUs = cfg.starterPurgeUs; pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false);
+      startUs = starterKickOrSteady(cfg.starterPurgeUs); pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false);
       if (millis() - stageEnteredMs >= cfg.purgeTimeMs) { resetRpmStats(); enterStage(ST_SPINUP_PREHEAT); Serial.println("START STAGE -> SPINUP_PREHEAT"); }
       break;
     case ST_SPINUP_PREHEAT:
@@ -1783,6 +1848,7 @@ void printConfig() {
   Serial.print("rpmTolerance="); Serial.println(cfg.rpmTolerance);
   Serial.print("accelToIdleTimeoutMs="); Serial.println(cfg.accelToIdleTimeoutMs);
   Serial.print("cooldown min/timeout/target/starter="); Serial.print(cfg.cooldownMinMs); Serial.print("ms/"); Serial.print(cfg.cooldownTimeoutMs); Serial.print("ms/"); Serial.print(cfg.cooldownTargetC); Serial.print("C/"); Serial.print(cfg.cooldownStarterUs); Serial.println("us");
+  Serial.print("starterKickUs="); Serial.print(cfg.starterKickUs); Serial.print("us starterKickMs="); Serial.print(cfg.starterKickMs); Serial.println("ms");
   Serial.print("commWatchdogEnabled="); Serial.print(cfg.commWatchdogEnabled ? "ON" : "OFF"); Serial.print(" commTimeoutMs="); Serial.println(cfg.commTimeoutMs);
   Serial.print("fuelTargetRpm="); Serial.println(fuelTargetRpm);
   Serial.print("fuelTargetUs="); Serial.print(fuelTargetUs); Serial.print(" (~"); Serial.print(flowFromUs(fuelTargetUs), 1); Serial.println(" ml/min)");
@@ -1823,6 +1889,7 @@ void printHelp() {
   Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us>");
   Serial.println("set idlerpm <rpm> | set maxrpm <rpm> | set rpmtol <rpm> | set maxegt <C>");
   Serial.println("set acceltoidlems <ms> | set cooldownms <minMs> <timeoutMs> | set cooltarget <C> | set coolstarter <us>");
+  Serial.println("set starterkickus <1100..2000> | set starterkickms <0..2000> -> brief kick pulse at start of ST_PURGE, 0ms disables");
   Serial.println("set throttle <0..100> | set accelms <ms> | set decelms <ms> | set lowaccelms <ms> | set lowdecelms <ms>");
   Serial.println("set commtimeout <3000..60000> -> comm watchdog window (ms) while IDLING/OPERATING");
   Serial.println("set commwatchdog on/off -> abort if no Serial/Web link within commtimeout (arm2 required to disable)");
@@ -2057,6 +2124,8 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set acceltoidlems ")) { int v = numberAfter(cmd, "set acceltoidlems "); if (v < 5000 || v > 60000) { Serial.println("ERROR: acceltoidlems 5000..60000"); return; } cfg.accelToIdleTimeoutMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set cooltarget ")) { int v = numberAfter(cmd, "set cooltarget "); if (v < 50 || v > 250) { Serial.println("ERROR: cooltarget 50..250 C"); return; } cfg.cooldownTargetC = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set coolstarter ")) { int v = numberAfter(cmd, "set coolstarter "); if (v < 1000 || v > 1200) { Serial.println("ERROR: coolstarter 1000..1200 us"); return; } cfg.cooldownStarterUs = v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set starterkickus ")) { int v = numberAfter(cmd, "set starterkickus "); if (v < 1100 || v > 2000) { Serial.println("ERROR: starterkickus 1100..2000"); return; } cfg.starterKickUs = v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set starterkickms ")) { int v = numberAfter(cmd, "set starterkickms "); if (v < 0 || v > 2000) { Serial.println("ERROR: starterkickms 0..2000 (0 disables the kick)"); return; } cfg.starterKickMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set cooldownms ")) { int minMs; uint32_t timeoutMs; if (!parseTwoInts(cmd, minMs, timeoutMs)) { Serial.println("ERROR: use set cooldownms <minMs> <timeoutMs>"); return; } if (minMs < 1000 || minMs > 30000 || timeoutMs < 5000 || timeoutMs > 120000 || timeoutMs < (uint32_t)minMs) { Serial.println("ERROR: minMs 1000..30000, timeoutMs 5000..120000 and >= minMs"); return; } cfg.cooldownMinMs = (uint32_t)minMs; cfg.cooldownTimeoutMs = timeoutMs; Serial.println("OK"); return; }
   if (cmd.startsWith("set accelms ")) { int v = numberAfter(cmd, "set accelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: accelms 50..2000"); return; } cfg.accelStepDelayMs = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set decelms ")) { int v = numberAfter(cmd, "set decelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: decelms 50..2000"); return; } cfg.decelStepDelayMs = v; Serial.println("OK"); return; }
@@ -2078,10 +2147,8 @@ void setup() {
   pinMode(PIN_USER_BTN, INPUT_PULLUP); // external 10k pull-up is also OK; button shorts to GND
   pinMode(PIN_RPM, INPUT);
   attachRpmInterrupt();
-  ESP32PWM::allocateTimer(0); ESP32PWM::allocateTimer(1); ESP32PWM::allocateTimer(2); ESP32PWM::allocateTimer(3);
-  escPump.setPeriodHertz(50); escStart.setPeriodHertz(50);
-  escPump.attach(PIN_ESC_PUMP, ESC_MIN_US, ESC_MAX_US);
-  escStart.attach(PIN_ESC_START, ESC_MIN_US, ESC_MAX_US);
+  escAttach(PIN_ESC_PUMP, LEDC_CH_PUMP);
+  escAttach(PIN_ESC_START, LEDC_CH_START);
   forceSafeOutputs();
   lastOperatorLinkMs = millis();
   bool thermoOk = thermo.begin();
