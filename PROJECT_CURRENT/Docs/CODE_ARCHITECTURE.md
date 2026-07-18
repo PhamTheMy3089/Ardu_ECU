@@ -189,7 +189,7 @@ during `MODE_STARTING`; **Valve2** = main oil valve, open whenever fuel is comma
 Noise classes (`classifyRpmNoise`):
 ```
 NO_SIGNAL : no recent signal and raw==0
-NOISY     : raw>0 & accepted==0, OR rejected>=3/rejectPct>20, OR jitter>30% (>=5 intervals), OR rpmDiff>30%
+NOISY     : raw>1 & accepted==0 (a lone post-reset priming edge is NOT noise), OR rejected>=3/rejectPct>20, OR jitter>30% (>=5 intervals), OR rpmDiff>30%
 WARN      : rejected>0/rejectPct>5,  OR jitter>15% (>=3 intervals),           OR rpmDiff>15%
 CLEAN     : otherwise
 REST_NOISE: rest-guard active
@@ -268,9 +268,14 @@ Order and conditions:
 
 Other interlocks:
 - `requestStop()` acts only in STARTING/IDLING/OPERATING (no ABORTED backdoor).
-- `stage2Off()`/`off` in ABORTED only re-asserts safe outputs; requires `clearabort`.
+- `stage2Off()`/`off` in ABORTED, **and** in COOLDOWN while `cooldownAfterAbort` is
+  true, only re-asserts safe outputs and does not transition to WAITING — it lets
+  a post-abort cooldown finish into ABORTED instead of shortcutting past it;
+  requires `clearabort` either way.
 - `ignpulse` and `valve1/valve2 on` are blocked while EGT is hot
-  (`fuelCommandBlockedByHotEgt`); `starttest` (starter only) stays allowed.
+  (`fuelCommandBlockedByHotEgt`); `starttest` (starter only) stays allowed. The
+  Test Wizard's `test ign`/`test starter_ign`/`test valve1`/`test valve2` apply the
+  same hot-EGT guard (`test starter` is exempt, same reasoning).
 - All outputs OFF on boot; ESC held at 1000 µs during arm.
 
 ---
@@ -326,7 +331,7 @@ set idlerpm/maxrpm/rpmtol <rpm> | set maxegt <C> | set maxgrad <C/s>   (WAITING/
 set acceltoidlems/cooldownms/cooltarget/coolstarter ...
 set accelms/decelms/lowaccelms/lowdecelms | set throttle <0..100>
 set commtimeout <ms> | set commwatchdog on/off
-set rpmfilter <us> | set rpmedge rising|falling | set ppr 1|2
+set rpmfilter <us> | set rpmedge rising|falling | set ppr 1|2  (ppr: WAITING/ABORTED only, rescales live RPM)
 set egtstart dry|strict | set drystartms <ms>
 ```
 
