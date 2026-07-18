@@ -247,15 +247,22 @@ fuel/valves/ign forced OFF and its own RPM-test timeouts.
 ## 🔒 Safety — `checkFailures()` (runs every loop, not in WAITING/COOLDOWN/ABORTED)
 
 Order and conditions:
-1. **COMM_TIMEOUT** — while fuel is flowing (IDLING/OPERATING, and fuel-flowing
-   STARTING stages) with no operator link within `commTimeoutMs`. **Exempt** for
-   button-started runs (`runStartedByButton`); re-engages on any remote command.
+1. **COMM_TIMEOUT** — only while RUNNING (IDLING/OPERATING) with no operator link
+   within `commTimeoutMs`. **Exempt** for button-started runs (`runStartedByButton`);
+   re-engages on any remote command. MODE_STARTING is deliberately NOT covered (the
+   automated start outlasts `commTimeoutMs` with nothing to refresh the link, so
+   covering it would false-abort a Serial-only start); the start is bounded instead
+   by the per-stage timeouts.
 2. **EGT_FAULT** — sensor invalid (unless dry-start).
 3. **OVER_TEMP** — `egt.c ≥ maxEgtC` OR the 0.2 s look-ahead projects past it.
 4. **OVERSPEED** — usable RPM `≥ maxRpm`.
 5. **RPM_SIGNAL_LOST** — while fueled: in STARTING, pulse-recency only (so ignition
-   EMI classifying NOISY doesn't false-abort a light-off); in IDLING/OPERATING,
-   `!usable || no pulse within FUELED_RPM_LOSS_TIMEOUT_MS` (400 ms → fast flameout cut).
+   EMI classifying NOISY doesn't false-abort a light-off); in IDLING/OPERATING, no
+   pulse within `FUELED_RPM_LOSS_TIMEOUT_MS` (400 ms → fast flameout cut), OR a
+   NOISY-but-present signal sustained ≥ `RPM_NOISY_ABORT_MS` (300 ms debounce, so a
+   one-window EMI blip can't shut down a healthy engine). Suppressed for one
+   loss-timeout after any `resetRpmStats()` so a stats reset can't read as loss.
+   The same recency-not-NOISY logic is used by the SPINUP starter-prove checks.
 6. **FLAMEOUT** — RPM `< flameoutRpm` after a 1.5 s grace **anchored to
    `runningSinceMs`** (first stable idle), so throttle toggles can't re-arm/mask it.
 

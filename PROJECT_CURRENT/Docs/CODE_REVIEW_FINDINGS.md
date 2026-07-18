@@ -411,6 +411,37 @@ doc↔code). Xác nhận: **các fix vòng 1–2 đúng, không hồi quy**; **T
 
 ---
 
+# 🔎 Review GATE trước merge — vòng 4 (2026-07-18e)
+
+Quét thật kỹ bằng 4 agent (verify sâu 3 fix vòng 3; audit toàn bộ state machine/interlock;
+sensor/ISR/toán/concurrency; command/Web/SD). Xác nhận: 3 fix vòng 3 **đúng**; re-arm
+interlock **sạch, không còn rò**; toán học/ISR/atomicity/chia-0/LEDC/parse/SD **đúng**;
+TEST_STARTER **sạch**. Fix 8 điểm mới (gồm 1 hồi quy):
+
+- **A** (an toàn) Test Wizard `test ign/starter_ign/valve1/valve2` giờ chặn EGT nóng
+  (`fuelCommandBlockedByHotEgt`) như các lệnh trực tiếp; `test starter` vẫn cho (làm mát).
+- **B** (hồi quy do #7 vòng 2) Comm watchdog **bỏ phủ MODE_STARTING** → start-bằng-Serial
+  không còn bị COMM_TIMEOUT oan giữa chừng; fuel-unattended lúc start vẫn được stage timeout chặn.
+- **G** (an toàn) Lệnh reset RPM (`rpmreset`/`set rpmfilter`/`set rpmedge`, cả nút Web) không
+  còn gây `RPM_SIGNAL_LOST` oan khi đang chạy: thêm **grace** sau `resetRpmStats()`
+  (`rpmStatsResetAtMs`) trong checkFailures.
+- **D** SPINUP starter-prove (2 chỗ) dùng **recency** thay `rpmMeasurementUsable()` → EMI
+  igniter/starter không abort `NO_STARTER_RPM` oan (đồng bộ với checkFailures STARTING).
+- **H** `set idlerpm` không cho vượt `maxRpm-5000` (giữ invariant idle<max, tránh governor
+  nhắm trên OVERSPEED).
+- **I** `set ppr` giờ chỉ nhận ở WAITING/ABORTED (đổi mid-run rescale RPM → FLAMEOUT/OVERSPEED oan).
+- **E** `classifyRpmNoise`: xung mồi đầu tiên (raw==1, accepted==0) không còn bị coi NOISY (đổi `raw>0`→`raw>1`).
+- **F**/**J** vá sentinel `micros()==0` trong updateRpm; nới reserve JSON 2560→3072.
+
+**Chấp nhận (không sửa)**: `off` lúc soft-stop cooldown cắt airflow sớm (thao tác chủ ý,
+restart vẫn chặn EGT); phơi nhiễm overspeed ≤300ms khi NOISY (đánh đổi có chủ đích);
+`checkPostIgnitionRpmRise` dùng usable (cửa sổ 10s che, rủi ro thấp); millis rollover ~49.7 ngày.
+
+**Verify**: compile sạch (`g++ -fsyntax-only -Wall -Wextra`, không warning) + mô phỏng
+auto-prototype Arduino (OK).
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-18d (quét vòng 3: cooldownms, off-cooldown interlock, RPM debounce)
+**Lần cập nhật**: 2026-07-18e (review GATE vòng 4 trước merge: 8 fix gồm hồi quy watchdog)
