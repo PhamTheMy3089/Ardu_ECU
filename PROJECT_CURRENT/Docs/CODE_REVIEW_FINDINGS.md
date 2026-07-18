@@ -1,7 +1,7 @@
 # Kết Quả Code Review - ECU_TestV1_EGT_DRY_START_PATCH.ino
 
-**Ngày review**: 2026-07-16  
-**File**: `ECU_TestV1_EGT_DRY_START_PATCH.ino` (1,919 dòng)  
+**Ngày review**: 2026-07-16 (review gốc; xem các mục cập nhật cuối file cho thay đổi mới nhất)  
+**File**: `ECU_TestV1_EGT_DRY_START_PATCH.ino` (~2290 dòng)  
 **Trạng thái**: Sẵn sàng upload ESP32 — với lưu ý các vấn đề bên dưới
 
 ---
@@ -270,8 +270,12 @@ và nâng giá trị test.
 | 2 | `ECU_TestV1_EGT_DRY_START_PATCH.ino` | **starterSpinUs 1150 → 1200** (test wizard "Starter" + spin thật + default Web UI "Starter Manual Test"). **introFuelUs 1160 → 1210** (pump prime test + intro fuel thật). Nới trần bench `pumptest` 1175 → **1225µs** để đạt mức mới |
 | 3 | `TEST/TEST_STARTER/TEST_STARTER.ino` | Gỡ toàn bộ kick (globals, `applyPwm`/`setPwm`, lệnh `kickus`/`kickms`, trường JSON, mục Web UI, docstring). Default PWM Web UI 1150 → 1200 |
 
-**Lưu ý**: `introFuelUs`(1210) hiện > `idleFuelUs`(1175) — theo quyết định "đổi
-cả config chung"; ảnh hưởng cả chuỗi khởi động thật, không chỉ lệnh test.
+> ⚠️ **ĐÃ THAY ĐỔI SAU (superseded)**: hàng #2 để `introFuelUs=1210` gây `introFuelUs > idleFuelUs`
+> (khởi động quá giàu). Xem mục **2026-07-18 (review toàn project)** bên dưới: `introFuelUs`
+> đã khôi phục về **1160** (< idle) và giá trị pump test **1210** tách sang biến riêng `pumpTestUs`.
+
+**Lưu ý (đã lỗi thời — xem ghi chú trên)**: `introFuelUs`(1210) từng > `idleFuelUs`(1175)
+theo quyết định "đổi cả config chung"; nay đã tách `pumpTestUs`.
 
 **Không hard-code — chỉnh runtime**: các mức PWM starter/fuel giờ đổi được lúc
 chạy, không cần build lại firmware:
@@ -331,6 +335,43 @@ auto-prototype Arduino cho firmware chính.
 
 ---
 
+# 🔎 Quét toàn project vòng 2 + fix logic điều khiển (2026-07-18b)
+
+Quét lại bằng 3 agent (hồi quy PR #17, correctness mới, docs↔code). Xác nhận PR #17
+đúng, không hồi quy; TEST_STARTER không bug. Fix thêm các lỗi logic điều khiển:
+
+**Logic điều khiển (#1–4)**
+- **#1** Soft cut quá nhiệt trước đây chỉ ~2µs/s (không kịp) → khi `egtRequestsFuelCut()`
+  giờ hạ `pumpUs` theo bước `fuelCutStepUs` ở nhịp decel nhanh (~40µs/s), vẫn có hard
+  OVER_TEMP làm net cuối.
+- **#2** `updateOperating`: governor full-throttle nhắm `maxRpm - rpmTolerance` (không
+  còn tự kích OVERSPEED ở 100% throttle).
+- **#3** RPM-loss khi IDLING/OPERATING dùng `FUELED_RPM_LOSS_TIMEOUT_MS=400ms` (thay 1s)
+  → cắt nhiên liệu nhanh sau flameout thật.
+- **#4** Grace flameout neo vào `runningSinceMs` (idle ổn định đầu tiên), không reset khi
+  gạt throttle IDLING↔OPERATING.
+
+**Tuning/robustness (#5–8)**
+- **#5** Trong `MODE_STARTING`, bỏ chặn theo gradient/look-ahead 3s (rise lúc light-off là
+  bình thường) — chỉ còn `maxEgtC` tuyệt đối + look-ahead ngắn của abort. Thêm `set maxgrad`.
+- **#6** RPM_SIGNAL_LOST lúc STARTING chỉ dựa vào "có xung gần đây" (recency), không dựa
+  vào phân loại NOISY → nhiễu ign lúc light-off không abort oan; sensor chết vẫn bắt được.
+- **#7** Comm watchdog phủ cả `MODE_STARTING` khi đã có nhiên liệu (không phủ PURGE/SPINUP khô;
+  run bằng nút vẫn miễn).
+- **#8** OVER_TEMP abort thêm look-ahead ngắn `EGT_ABORT_LOOKAHEAD_S=0.2s` bù trễ ~1 mẫu EGT.
+
+**Docs/cosmetic**: bỏ `ESP32Servo` khỏi README; sửa số dòng/ngày; ghi chú superseded cho
+mục introFuelUs=1210; zero timer valve trong forceSafeOutputs; nới reserve JSON 2048→2560.
+
+**Verify**: compile sạch (`g++ -fsyntax-only -Wall -Wextra`, không warning) + mô phỏng
+auto-prototype Arduino (OK).
+
+> **Cần validate trên động cơ thật**: tốc độ cắt nhiên liệu #1, ngưỡng governor #2, các
+> giá trị timeout/gradient #3/#5/#8 nên được kiểm chứng bằng lần chạy thật và tinh chỉnh
+> qua `set ...`.
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-18 (review toàn project + fix an toàn HIGH/MEDIUM/LOW)
+**Lần cập nhật**: 2026-07-18b (quét vòng 2 + fix logic điều khiển #1–8)

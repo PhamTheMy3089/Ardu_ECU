@@ -146,4 +146,4 @@ PWM=1200us | RPM=8450 (win 8410) | raw=141 acc=141 rej=0 (0.0%) | jit=4.2% cv=1.
 ---
 
 **Firmware**: TEST_STARTER.ino — bench test only  
-**Cập nhật**: 2026-07-16
+**Cập nhật**: 2026-07-18
