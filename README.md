@@ -108,12 +108,15 @@ Ba trimpot: RP1 (offset), RP2 (gain), RP3 (threshold). Xem `Docs/COMMISSIONING_G
 ## Thư Viện Cần Cài (Arduino IDE)
 
 ```
-ESP32Servo
 Adafruit_MAX31855
 WiFi         (có sẵn trong ESP32 core)
 WebServer    (có sẵn trong ESP32 core)
 SD           (có sẵn trong ESP32 core)
 ```
+
+ESC PWM dùng thẳng LEDC có sẵn trong ESP32 core (`escAttach`/`escWriteUs`) —
+**không** cần cài `ESP32Servo`. Xem `CLAUDE.md` để biết lý do (ESP32Servo từng
+gây khựng starter độc lập với nguồn điện).
 
 ---
 

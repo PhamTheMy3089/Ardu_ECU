@@ -589,6 +589,12 @@ Với mỗi test, dùng `checklist` để xem kết quả — tất cả phải 
 `NOT_RUN` → `PASS`. Nếu `FAIL` — sửa phần cứng trước khi tiếp tục (đừng
 chỉnh firmware để né test).
 
+> **Chặn khi EGT còn nóng**: `test ign`/`test starter_ign`/`test valve1`/`test valve2`
+> đều bị chặn nếu EGT còn nóng hơn `cooldownTargetC` (giống hệt lệnh trực tiếp
+> `ignpulse`/`valve on`) — tránh châm lửa/mở van vào lõi còn nóng sau abort.
+> Riêng `test starter` (chỉ starter) vẫn cho chạy vì giúp làm mát. Nếu test bị
+> `BLOCKED` do nóng, đợi nguội hoặc chạy tiếp cooldown trước khi test lại.
+
 **Component test khác (tùy chọn, bench-only)**:
 ```
 starttest <us> <ms>   -> vd: starttest 1200 3000
@@ -707,24 +713,6 @@ Theo dõi bằng `status` liên tục (auto in mỗi ~1s) hoặc Web UI:
 Nếu bất kỳ đâu bị **ABORT** (OVER_TEMP, NO_IGNITION, NO_RPM_RISE,
 RPM_SIGNAL_LOST, OVERSPEED, COMM_TIMEOUT...) — **đọc kỹ lý do trên Serial
 trước khi `clearabort`**. Không type `clearabort` theo phản xạ.
-
-### ⚠️ Xả nhiên liệu tồn dư trước khi thử start lại (sau NO_IGNITION / ACCEL_TO_IDLE_TIMEOUT)
-
-Theo manual EnJet E80/E100 (`REFERENCES/Documentation/Engine_Manual_E80_E100.pdf`):
-nếu lần start trước bị fail sau khi đã phun dầu nhưng không bắt lửa,
-nhiên liệu chưa cháy **vẫn còn đọng lại trong buồng đốt**. Cố start lại
-ngay có thể gây cháy lớn khi lượng dầu tồn dư này bắt lửa đột ngột cùng
-lúc với lần mồi mới.
-
-**Quy trình xả trước khi start lại**:
-1. Nghiêng động cơ, **đuôi (exhaust) hướng xuống dưới**
-2. Dùng `starttest <us> <ms>` để quay rotor vài giây, không phun thêm
-   nhiên liệu — thổi bay dầu tồn đọng ra khỏi buồng đốt qua đuôi
-3. Sau đó mới `clearabort` và thử `startidle` lại
-
-Bỏ qua bước này nếu lần fail là do abort SỚM (`NO_STARTER_RPM`, `OVER_TEMP`
-trước khi có nhiên liệu) — chỉ áp dụng khi đã ở stage `ST_INTRO_FUEL` trở
-lên (đã phun dầu) mà chưa đánh lửa thành công.
 
 ### ⚠️ Xả nhiên liệu tồn dư trước khi thử start lại (sau NO_IGNITION / ACCEL_TO_IDLE_TIMEOUT)
 
