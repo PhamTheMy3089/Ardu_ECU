@@ -391,6 +391,26 @@ auto-prototype Arduino (OK).
 
 ---
 
+# 🔎 Quét toàn project vòng 3 (2026-07-18d)
+
+Quét lại bằng 2 agent (correctness + hồi quy toàn firmware; TEST_STARTER + đối chiếu
+doc↔code). Xác nhận: **các fix vòng 1–2 đúng, không hồi quy**; **TEST_STARTER không bug**;
+`CODE_ARCHITECTURE.md` khớp code (chỉ 3 chỗ chữ nghĩa nhỏ đã vá). Fix 3 điểm mới:
+
+- **#1 `set cooldownms` hỏng**: `parseTwoInts` cắt theo dấu cách đầu tiên nhưng lệnh có
+  prefix 3 từ → `minMs` parse nhầm thành 0 → luôn báo lỗi. Sửa: parse riêng 2 số sau prefix.
+- **#2 `off`/SAFE-OFF lúc COOLDOWN-sau-abort** lọt sang WAITING (xóa lý do lỗi, bỏ qua
+  `clearabort`, cắt luôn airflow làm mát). Sửa: `stage2Off()` bỏ qua khi
+  `MODE_COOLDOWN && cooldownAfterAbort` → để cooldown chạy hết vào ABORTED.
+- **#3 RPM_SIGNAL_LOST abort oan động cơ đang chạy** (có sẵn): NOISY do `rejected≥3` tuyệt
+  đối trong 1 cửa sổ 100ms có thể tắt máy khoẻ. Sửa: **debounce** NOISY-nhưng-còn-xung ở
+  IDLING/OPERATING — chỉ abort nếu kéo dài ≥ `RPM_NOISY_ABORT_MS` (300ms); mất xung thật
+  (recency 400ms) vẫn abort ngay.
+
+**Verify**: compile sạch (`g++ -fsyntax-only -Wall -Wextra`) + mô phỏng auto-prototype Arduino.
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-18c (xử lý các mục LOW còn lại)
+**Lần cập nhật**: 2026-07-18d (quét vòng 3: cooldownms, off-cooldown interlock, RPM debounce)

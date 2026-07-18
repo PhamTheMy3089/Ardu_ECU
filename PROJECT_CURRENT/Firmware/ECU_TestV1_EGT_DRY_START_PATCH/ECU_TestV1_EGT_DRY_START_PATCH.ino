@@ -138,6 +138,11 @@ static const uint32_t VALVE_TEST_TIMEOUT_MS = 10000;  // bench valve1/valve2 "on
 // Faster RPM-loss detection while fueled at running RPM (IDLING/OPERATING), so fuel
 // is cut promptly after a real flameout instead of waiting the full 1s signal timeout.
 static const uint32_t FUELED_RPM_LOSS_TIMEOUT_MS = 400;
+// While running (IDLING/OPERATING), pulses are still arriving but the signal is
+// classified NOISY: require it to persist this long before RPM_SIGNAL_LOST, so a
+// single transient EMI burst (one ~100ms window) can't false-abort a healthy
+// engine. A genuine loss of pulses is still caught by the recency check above.
+static const uint32_t RPM_NOISY_ABORT_MS = 300;
 // Short EGT look-ahead used only by the OVER_TEMP hard abort, to compensate for the
 // ~1-sample (EGT_READ_PERIOD_MS) staleness of egt.c so a fast rise cannot overshoot
 // maxEgtC by ~one sample before the abort reacts. Deliberately small (not the 3s
@@ -619,6 +624,13 @@ void stage2Off() {
     // require an explicit clearabort (which sets abortAcknowledged).
     forceSafeOutputs();
     Serial.println("SAFE OFF: already safe in ABORTED. Use 'clearabort' to acknowledge the fault before re-arm.");
+    return;
+  }
+  if (ecuMode == MODE_COOLDOWN && cooldownAfterAbort) {
+    // This cooldown is heading to ABORTED. Do not let SAFE OFF short-circuit it to
+    // WAITING (that would wipe the fault reason, skip the clearabort interlock, AND
+    // cut the cooling airflow on a hot engine). Let the cooldown finish -> ABORTED.
+    Serial.println("SAFE OFF ignored during post-abort cooldown. It will finish -> ABORTED; use 'clearabort' to acknowledge.");
     return;
   }
   stage2Armed = false;
@@ -1987,13 +1999,31 @@ void checkFailures() {
   //    a start. A truly dead sensor still trips via recency.
   //  - IDLING/OPERATING (running RPM): use the shorter FUELED_RPM_LOSS_TIMEOUT_MS so
   //    fuel is cut promptly after a real flameout instead of ~1s later.
+  static uint32_t rpmNoisySinceMs = 0;   // debounce for NOISY-but-present while running
   if (cfg.abortOnRpmFault && fueled) {
     bool lost = false;
-    if (ecuMode == MODE_STARTING)
+    if (ecuMode == MODE_STARTING) {
       lost = !rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS);
-    else if (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING)
-      lost = (!rpmMeasurementUsable() || !rpmSignalRecentWithin(FUELED_RPM_LOSS_TIMEOUT_MS));
+      rpmNoisySinceMs = 0;
+    } else if (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) {
+      if (!rpmSignalRecentWithin(FUELED_RPM_LOSS_TIMEOUT_MS)) {
+        lost = true;                       // real: no accepted pulse within 400ms
+        rpmNoisySinceMs = 0;
+      } else if (!rpmMeasurementUsable()) {
+        // Pulses still arriving but classified NOISY. Debounce: only abort if it
+        // persists >= RPM_NOISY_ABORT_MS, so a one-window EMI blip doesn't shut
+        // down a healthy running engine.
+        if (rpmNoisySinceMs == 0) rpmNoisySinceMs = millis();
+        if (millis() - rpmNoisySinceMs >= RPM_NOISY_ABORT_MS) lost = true;
+      } else {
+        rpmNoisySinceMs = 0;               // signal usable again
+      }
+    } else {
+      rpmNoisySinceMs = 0;
+    }
     if (lost) { abortAll("RPM_SIGNAL_LOST"); return; }
+  } else {
+    rpmNoisySinceMs = 0;
   }
 
   // Flameout grace is anchored to runningSinceMs (first stable idle of the run), not
@@ -2317,7 +2347,18 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set acceltoidlems ")) { int v = numberAfter(cmd, "set acceltoidlems "); if (v < 5000 || v > 60000) { Serial.println("ERROR: acceltoidlems 5000..60000"); return; } cfg.accelToIdleTimeoutMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set cooltarget ")) { int v = numberAfter(cmd, "set cooltarget "); if (v < 50 || v > 250) { Serial.println("ERROR: cooltarget 50..250 C"); return; } cfg.cooldownTargetC = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set coolstarter ")) { int v = numberAfter(cmd, "set coolstarter "); if (v < 1000 || v > 1200) { Serial.println("ERROR: coolstarter 1000..1200 us"); return; } cfg.cooldownStarterUs = v; Serial.println("OK"); return; }
-  if (cmd.startsWith("set cooldownms ")) { int minMs; uint32_t timeoutMs; if (!parseTwoInts(cmd, minMs, timeoutMs)) { Serial.println("ERROR: use set cooldownms <minMs> <timeoutMs>"); return; } if (minMs < 1000 || minMs > 30000 || timeoutMs < 5000 || timeoutMs > 120000 || timeoutMs < (uint32_t)minMs) { Serial.println("ERROR: minMs 1000..30000, timeoutMs 5000..120000 and >= minMs"); return; } cfg.cooldownMinMs = (uint32_t)minMs; cfg.cooldownTimeoutMs = timeoutMs; Serial.println("OK"); return; }
+  if (cmd.startsWith("set cooldownms ")) {
+    // NOTE: this command has a 3-word prefix, so the generic parseTwoInts() (which
+    // splits on the first two spaces) would misparse "cooldownms" as the first int.
+    // Parse the two values from after the prefix explicitly.
+    String a = cmd.substring(String("set cooldownms ").length()); a.trim();
+    int sp = a.indexOf(' ');
+    if (sp < 0) { Serial.println("ERROR: use set cooldownms <minMs> <timeoutMs>"); return; }
+    int minMs = a.substring(0, sp).toInt();
+    uint32_t timeoutMs = (uint32_t)a.substring(sp + 1).toInt();
+    if (minMs < 1000 || minMs > 30000 || timeoutMs < 5000 || timeoutMs > 120000 || timeoutMs < (uint32_t)minMs) { Serial.println("ERROR: minMs 1000..30000, timeoutMs 5000..120000 and >= minMs"); return; }
+    cfg.cooldownMinMs = (uint32_t)minMs; cfg.cooldownTimeoutMs = timeoutMs; Serial.println("OK"); return;
+  }
   if (cmd.startsWith("set accelms ")) { int v = numberAfter(cmd, "set accelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: accelms 50..2000"); return; } cfg.accelStepDelayMs = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set decelms ")) { int v = numberAfter(cmd, "set decelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: decelms 50..2000"); return; } cfg.decelStepDelayMs = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set lowaccelms ")) { int v = numberAfter(cmd, "set lowaccelms "); if (v < 100 || v > 3000) { Serial.println("ERROR: lowaccelms 100..3000"); return; } cfg.lowAccelStepDelayMs = v; Serial.println("OK"); return; }
