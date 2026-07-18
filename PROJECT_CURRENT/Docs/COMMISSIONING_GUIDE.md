@@ -270,7 +270,30 @@ KMZ10A (U17, header 4 chân)
 
 > GND probe **luôn cắm vào U15 (TP_GND)**.
 
+> **Time/div theo tốc độ quay**: các giá trị Time/div ở trên (2ms) hợp khi
+> rotor quay **nhanh** (quạt/khí nén mạnh, hoặc starter ở A5). Nếu **quay tay
+> chậm ~1–3 vòng/giây**, một chu kỳ kéo dài ~200–500ms nên 2ms/div sẽ không
+> thấy hết sóng — hãy **nới Time/div lên ~50–100ms/div** để thấy trọn 1–2 chu
+> kỳ trước, rồi thu lại khi cần xem chi tiết đỉnh sóng. Volt/div và điểm nối
+> probe giữ nguyên như bảng.
+
 ### GIAI ĐOẠN A — Hiệu Chỉnh Analog Bằng Oscilloscope
+
+> **Quy ước nối DSO152 (áp dụng cho mọi bước A1–A5):**
+> - **Que mát** (kẹp cá sấu, đầu ⏚) → luôn cắm cố định vào **U15 (TP_GND)**,
+>   không tháo ra suốt Giai đoạn A.
+> - **Que tín hiệu** (đầu nhọn) → chạm vào testpoint của từng bước; mỗi bước
+>   dưới đây có dòng **🔌 Nối probe** ghi rõ testpoint và vị trí trên mạch.
+> - DSO152 chỉ có **1 kênh** → chỉ đo 1 điểm mỗi lần; di chuyển que tín hiệu
+>   lần lượt qua các testpoint theo thứ tự A1 → A2 → A3 → A4 → A5.
+
+> **Bố trí sensor–magnet trên bản dựng này (đọc kỹ trước bước A2):**
+> nam châm neodymium gắn **cố định** trong bánh nén/turbine bằng **nhôm**,
+> cách mặt KMZ10A khoảng **~5cm** — khoảng cách do kết cấu cơ khí quyết định,
+> **không chỉnh được** khi test. Nhôm không chắn từ trường nên tại ~5cm vẫn
+> thu đủ biên độ (đã kiểm chứng thực tế trên bản dựng này). Do đó khi tín hiệu
+> yếu/không có, **đừng đi tìm cách "đưa magnet lại gần"** — hãy soát **hướng
+> đặt KMZ10A**, từ tính nam châm, và dây/nguồn.
 
 **Cách quay magnet khi rotor nằm bên trong (không quay tay được)**
 
@@ -292,29 +315,44 @@ nhau tùy mục đích từng bước:
   tay là cách đơn giản nhất, vẫn dùng bình thường cho mọi bước A2-A5.
 
 **A1 — Kiểm tra nguồn** (không cần quay magnet)
+
+> 🔌 **Nối probe**: que mát → **U15 (TP_GND)**. Que tín hiệu: bước **A1a**
+> chạm **U16 (TP_5V)** — testpoint rail +5V; bước **A1b** chuyển sang
+> **U14 (TP_VREF)** — testpoint mid-rail 2.5V.
+
 - U16: DC phẳng +5.0V ±0.2V. U14: DC ổn định 2.4-2.6V.
 - Sai → kiểm tra BEC/hàn R40/R39/C23/C1 trước khi tiếp tục.
 
 **A2 — Xem tín hiệu INA826 (U3)**
+
+> 🔌 **Nối probe**: que tín hiệu → **U3 (TP_INA_OUT)** — testpoint ngay sau
+> IC khuếch đại đo lường **INA826 (U20)**; que mát → **U15 (TP_GND)**. AC coupling.
+
 - Quay magnet ~1-3 vòng/giây (quạt/khí nén hoặc tay, xem trên), AC coupling.
 - Kỳ vọng: sóng sin/quasi-sin, biên độ 200mV-1Vpp.
-- Không thấy gì → kiểm tra khoảng cách magnet-sensor (≤3mm), thử xoay KMZ10A 90°.
+- Không thấy gì → khoảng cách magnet cố định (~5cm, xem ghi chú đầu Giai đoạn A)
+  **không phải chỗ để chỉnh**: kiểm tra **hướng đặt KMZ10A** (xoay 90° thử),
+  xác nhận nam châm còn từ tính, soát lại dây/nguồn (A1).
 
 *Nếu sóng không ra hình sin/quasi-sin*:
 
 | Dạng sóng thấy được | Nguyên nhân khả dĩ | Xử lý |
 |---|---|---|
-| Đỉnh bị cắt phẳng (clipping/vuông hóa) | Magnet quá gần/quá mạnh → INA826 bão hòa (gain ×38 cố định) | Đưa magnet ra xa hơn, hoặc đổi magnet yếu hơn |
+| Đỉnh bị cắt phẳng (clipping/vuông hóa) ngay tại U3 | INA826 bão hòa do nam châm quá mạnh (gain ×38 cố định) — hiếm gặp ở ~5cm | Khoảng cách cố định không đổi được → nếu thật sự clipping tại U3 thì thay nam châm yếu hơn. Nếu U3 vẫn tròn mà chỉ méo ở U1 → đó là clipping tầng sau, giảm RP2 (A4) |
 | Răng cưa/tam giác thay vì sin | Quay không đều (quạt thổi giật cục, hoặc tay quay không đều) | Quay đều hơn — không phải lỗi mạch |
 | Nhiễu loạn, không thấy chu kỳ rõ | EMI/nhiễu nền, dây tín hiệu gần dây công suất, tiếp xúc lỏng | Kiểm tra dây, tách xa nguồn nhiễu, xem lại A1 |
 | "Nhọn"/không tròn nhưng vẫn đều theo chu kỳ | Bình thường với AMR sensor — đây là lý do gọi "quasi-sin" | Không cần sửa, miễn biên độ đạt 200mV-1Vpp và có chu kỳ rõ |
-| Hoàn toàn phẳng, không AC | Sensor chết/sai hướng/mất nguồn | Xem lại A1, kiểm tra hướng KMZ10A, khoảng cách magnet |
+| Hoàn toàn phẳng, không AC | Sensor chết/sai hướng/mất nguồn | Xem lại A1, kiểm tra hướng đặt KMZ10A, xác nhận nam châm còn từ tính |
 
 Nguyên tắc chung: miễn sóng **có chu kỳ rõ ràng, biên độ đủ, lặp lại đều
 theo tốc độ quay** thì không bắt buộc phải là sin hoàn hảo — bước RP1/RP2/
 RP3 tiếp theo sẽ xử lý phần còn lại.
 
 **A3 — Chỉnh RP1 (Offset) tại U1**
+
+> 🔌 **Nối probe**: que tín hiệu → **U1 (TP_LMV358_OUT)** — testpoint sau
+> 2 tầng op-amp **LMV358 (U18)**, ngay trước comparator; que mát →
+> **U15 (TP_GND)**. DC coupling.
 
 *RP1 chỉnh gì*: RP1 là trimpot hồi tiếp của tầng LMV358 Op-Amp 1 — nó
 **dịch mức DC (offset)** của tín hiệu analog lên/xuống, không ảnh hưởng
@@ -345,6 +383,9 @@ phải **bằng nhau** (sai lệch ≤0.1V là chấp nhận được).
 
 **A4 — Chỉnh RP2 (Gain) tại U1**
 
+> 🔌 **Nối probe**: **giữ nguyên** que tín hiệu ở **U1 (TP_LMV358_OUT)** như
+> A3 (que mát vẫn ở U15) — A4 đo cùng điểm với A3, chỉ khác trimpot cần vặn.
+
 *RP2 chỉnh gì*: RP2 là trimpot hồi tiếp của tầng LMV358 Op-Amp 2 — nó
 **thay đổi hệ số khuếch đại (gain)** của tín hiệu, tức là kéo giãn/co lại
 biên độ dao động AC, không dịch tâm DC (tâm vẫn giữ ở 2.5V nhờ RP1 đã
@@ -372,10 +413,16 @@ RP2 quá thấp (<0.5Vpp):       RP2 tối ưu (1-2Vpp):        RP2 quá cao (cl
 
 *Nhận biết clipping*: đỉnh/đáy sóng "phẳng" thay vì bo tròn tự nhiên →
 **giảm RP2**. Nếu biên độ vẫn dưới 0.5Vpp dù đã vặn RP2 tối đa → kiểm tra
-lại A2 (biên độ INA_OUT quá nhỏ, có thể do magnet yếu/quá xa) trước khi
-tiếp tục chỉnh RP2.
+lại A2 (biên độ INA_OUT quá nhỏ, thường do nam châm yếu hoặc lệch hướng
+sensor — không phải do khoảng cách vì khoảng cách cố định) trước khi tiếp
+tục chỉnh RP2.
 
 **A5 — Chỉnh RP3 (Threshold) tại U2, xác nhận xung RPM_OUT**
+
+> 🔌 **Nối probe**: que tín hiệu → **U2 (TP_RPM_OUT)** — testpoint xung ra
+> của comparator **LMV393 (U19)**, đây là **điểm đo quan trọng nhất**; que
+> mát → **U15 (TP_GND)**. DC coupling, 2V/div. (Khi cần đọc ngưỡng bằng số
+> ở cuối bước, chuyển tạm que tín hiệu sang **U21 / TP_VTH_RPM**.)
 
 *RP3 chỉnh gì*: RP3 đặt điện áp **VTH_RPM** — ngưỡng so sánh (IN− của
 LMV393 comparator). Đây là "lằn ranh" điện áp: sóng analog vượt lên trên
@@ -428,9 +475,14 @@ lan sang dây RPM). Có spike → tăng RP3 thêm ~1/8 vòng, hoặc tăng
 điện áp ngưỡng tại điểm làm việc tối ưu — con số này dùng để đối chiếu
 nếu sau này nghi ngờ trimpot bị trôi/lệch.
 
-**A-cuối — Xác nhận GPIO33**: cắm J_RPM_OUT1→RPM_PIN_IN1, probe GPIO33,
-kỳ vọng xung 0-3.3V (D1 TVS clamp). Nếu vẫn thấy 5V → D1 lỗi, thay ngay
-trước khi cấp nguồn ESP32.
+**A-cuối — Xác nhận GPIO33**: cắm J_RPM_OUT1→RPM_PIN_IN1.
+
+> 🔌 **Nối probe**: que tín hiệu → chân **GPIO33** trên ESP32 (hoặc đầu
+> **RPM_PIN_IN1** trên board ECU, sau R2/D1); que mát → **U15 (TP_GND)**
+> hoặc chân **GND của ESP32** (đã chung mát với mạch RPM). DC coupling, 2V/div.
+
+Kỳ vọng xung **0-3.3V** (D1 TVS clamp giữ không vượt 3.3V). Nếu vẫn thấy 5V
+→ D1 lỗi, thay ngay trước khi cấp nguồn ESP32.
 
 ### GIAI ĐOẠN B — Quét Toàn Dải PWM Bằng Firmware TEST_STARTER
 
@@ -462,19 +514,12 @@ không cần lib ngoài (LEDC PWM có sẵn trong core).
 | `ppr <n>` | Số xung/vòng (1=nam châm, 2=quang học) |
 | `filter <us>` | Bộ lọc glitch RPM (20..2000), mặc định 120 |
 | `edge rising\|falling` | Cạnh kích RPM |
-| `kickus <us>` | Mức PWM kick lúc bắt đầu từ OFF (1000..2000), mặc định 1300 |
-| `kickms <ms>` | Thời gian giữ kick trước khi hạ về PWM ổn định (0..2000, 0=tắt) |
 | `reset` | Xóa bộ đếm & lịch sử RPM |
 | `status` / `help` | In trạng thái / menu lệnh |
 
-> **Kick**: khi PWM chuyển từ OFF lên bất kỳ giá trị >1000µs, starter được cấp
-> `kickUs` trong `kickMs` trước rồi mới hạ về mức PWM đã yêu cầu — giúp starter
-> có cơ cấu Bendix/clutch ăn khớp dứt khoát thay vì trượt/khựng. Firmware ECU
-> chính có tính năng tương đương qua `set starterkickus`/`set starterkickms`
-> (áp dụng ở đầu giai đoạn `ST_PURGE`) — cũng chỉnh được từ Web UI dashboard
-> chính (mục "Starter Kick"), không bắt buộc phải dùng Serial. Mục
-> "Starter Manual Test" trên cùng dashboard cho phép chạy `starttest <us> <ms>`
-> trực tiếp từ trình duyệt (cần `arm2` trước, có nút riêng).
+> Firmware ECU chính có mục **"Starter Manual Test"** trên Web UI dashboard
+> cho phép chạy `starttest <us> <ms>` trực tiếp từ trình duyệt (cần `arm2`
+> trước, có nút riêng) — không bắt buộc phải dùng Serial.
 
 **Đọc dòng trạng thái** (in 2 lần/giây):
 ```
@@ -546,7 +591,7 @@ chỉnh firmware để né test).
 
 **Component test khác (tùy chọn, bench-only)**:
 ```
-starttest <us> <ms>   -> vd: starttest 1100 3000
+starttest <us> <ms>   -> vd: starttest 1200 3000
 ignpulse <ms>          -> vd: ignpulse 1500
 valve1 on/off | valve2 on/off
 ```
@@ -559,8 +604,16 @@ valve1 on/off | valve2 on/off
 
 ```
 arm2
-pumptest 1100 1500   -> bơm chạy 1500ms ở 1100us, đo ml thực tế đối chiếu bảng calib
+pumptest 1210 1500   -> bơm chạy 1500ms ở 1210us, đo ml thực tế đối chiếu bảng calib
 ```
+
+> Trần bench `pumptest` hiện là **1000..1225µs**. Nút "Pump prime" trên Web UI
+> chạy ở `introFuelUs` = **1210µs** (mặc định). Vẫn nên quét vài mức us để xác
+> nhận độ tuyến tính.
+>
+> **Các mức PWM này chỉnh trực tiếp được** (không hard-code): qua Serial
+> `set intro/idleus/maxus <us>` và `set purgeus/spinus/assistus <us>`, hoặc qua
+> panel **"Starter & Fuel PWM"** trên Web UI dashboard chính.
 
 **Bảng hiệu chuẩn pump** (đo thực tế, khớp firmware):
 
@@ -768,7 +821,7 @@ margin RP3.
 3. Đo PWM bằng oscilloscope/servo tester nếu nghi ngờ
 
 **Starter chạy nhưng RPM không tăng**
-1. Kiểm tra vị trí/khoảng cách sensor-magnet
+1. Kiểm tra vị trí/hướng đặt sensor so với magnet (khoảng cách cố định ~5cm)
 2. `rpmdetail on` — xem `raw` có tăng theo starter không
 3. Kiểm tra nguồn 5V cho mạch RPM sensor (qua UBEC riêng)
 
