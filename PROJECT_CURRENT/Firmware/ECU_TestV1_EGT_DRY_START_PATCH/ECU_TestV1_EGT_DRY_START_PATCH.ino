@@ -133,6 +133,7 @@ static const uint32_t EGT_READ_PERIOD_MS = 120;
 static const uint32_t STATUS_PRINT_MS = 250;
 static const uint32_t STAGE2_ARM_TIME_MS = 10000;
 static const uint32_t STARTER_PROVE_TIMEOUT_MS = 1500;
+static const uint32_t VALVE_TEST_TIMEOUT_MS = 10000;  // bench valve1/valve2 "on" auto-off window
 static const uint32_t SD_LOG_PERIOD_MS = 500;       // light telemetry logging: 2 lines/sec while active
 static const uint32_t SD_SPI_HZ = 1000000;          // tested OK after FAT32 format; lower to 400000 if needed
 
@@ -223,9 +224,14 @@ struct Config {
   int starterSpinUs = 1200;
   int starterAssistUs = 1200;
 
-  int introFuelUs = 1210;       // ~ pump prime / intro fuel
+  int introFuelUs = 1160;       // ~50 ml/min - light-off dose, kept < idleFuelUs
   int idleFuelUs = 1175;        // ~80 ml/min preview
   int maxFuelUs = 1260;         // ~280 ml/min preview
+
+  // Bench pump-prime test PWM (Test Wizard "Pump prime"). Decoupled from
+  // introFuelUs so the prime volume can be tuned high (default 1210us ~166 ml/min)
+  // without making the real start's light-off dose over-rich or exceeding idle.
+  int pumpTestUs = 1210;
 
   bool requireChecklistForStart = true; // require Test Wizard PASS before startidle
   bool webEnabled = true;               // SoftAP Web UI enabled by default
@@ -242,7 +248,9 @@ uint32_t ignitionDetectedMs = 0;  // set when EGT crosses ignition threshold; an
 bool cooldownAfterAbort = false;
 bool stage2Armed = false;
 bool abortAcknowledged = false;  // must be set via clearabort before re-arm from ABORTED
+bool runStartedByButton = false; // true if the current run was started by the physical button (comm watchdog does not apply)
 uint32_t stage2ArmUntilMs = 0, manualIgnOffAtMs = 0, manualStartOffAtMs = 0;
+uint32_t manualValve1OffAtMs = 0, manualValve2OffAtMs = 0;  // bench valve-test auto-off timers
 uint32_t lastOperatorLinkMs = 0;  // last Serial/Web command or Web UI /api poll; feeds the comm watchdog
 String lastAbortReason = "NONE";
 String serialCmdBuf = "";  // non-blocking serial command accumulator
@@ -568,6 +576,13 @@ void abortAll(const String& reason) {
 }
 
 void requestStop() {
+  // SOFT STOP only applies while the engine is actually running. Without this
+  // guard, `stop` from MODE_ABORTED would wipe lastAbortReason, re-spin the
+  // starter, and leak ABORTED -> WAITING, bypassing the clearabort interlock.
+  if (ecuMode != MODE_STARTING && ecuMode != MODE_IDLING && ecuMode != MODE_OPERATING) {
+    Serial.println("STOP ignored: only while STARTING/IDLING/OPERATING (use clearabort to leave ABORTED).");
+    return;
+  }
   lastAbortReason = "NONE";
   enterCooldown(false, "SOFT_STOP");
   Serial.println("STOP requested -> COOLDOWN");
@@ -580,13 +595,18 @@ bool isStage2Armed() {
 }
 void armStage2() { stage2Armed = true; stage2ArmUntilMs = millis() + STAGE2_ARM_TIME_MS; addLog("ARMED 10s"); Serial.println("WARNING: STAGE2 ARMED FOR 10 SECONDS"); }
 void stage2Off() {
-  if (ecuMode == MODE_ABORTED && !egtAllowsDeliberateAbortClear()) {
-    Serial.print("SAFE OFF BLOCKED: EGT still hot (");
-    Serial.print(egt.c, 1); Serial.print("C");
-    Serial.println("). Wait to cool or use physical button.");
+  if (ecuMode == MODE_ABORTED) {
+    // Outputs are already safe in ABORTED. SAFE OFF must NOT be a backdoor that
+    // clears the fault and drops the "acknowledge before re-arm" interlock;
+    // require an explicit clearabort (which sets abortAcknowledged).
+    forceSafeOutputs();
+    Serial.println("SAFE OFF: already safe in ABORTED. Use 'clearabort' to acknowledge the fault before re-arm.");
     return;
   }
-  stage2Armed = false; manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0; activeTest = TEST_NONE; enterWaitingSafe(); addLog("SAFE OFF"); Serial.println("STAGE2 OFF: outputs safe.");
+  stage2Armed = false;
+  manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0;
+  manualValve1OffAtMs = manualValve2OffAtMs = 0;
+  activeTest = TEST_NONE; enterWaitingSafe(); addLog("SAFE OFF"); Serial.println("STAGE2 OFF: outputs safe.");
 }
 
 
@@ -634,6 +654,9 @@ void startIdleFromButton() {
   stage2Armed = false;
   Serial.println("USER_BTN: START IDLE requested.");
   beginAutoIdle();
+  // Physical-button run: there is no Serial/Web link to prove alive, so the comm
+  // watchdog does not apply. It re-engages the moment any Serial/Web command arrives.
+  runStartedByButton = true;
 }
 
 void userButtonPressed() {
@@ -1060,7 +1083,7 @@ String sdCsvQuote(String s) {
 
 String sdCsvLine(const char* type, const String& eventText) {
   String line;
-  line.reserve(240);
+  line.reserve(320);
   line += String(millis()); line += ",";
   line += type; line += ",";
   line += modeName(ecuMode); line += ",";
@@ -1082,21 +1105,34 @@ String sdCsvLine(const char* type, const String& eventText) {
   return line;
 }
 
+// Consecutive-failure counter for the SD backoff below. Reset on any good write.
+static uint32_t sdConsecFail = 0;
+static const uint32_t SD_MAX_CONSEC_FAIL = 5;
+
 void sdAppendLine(const String& line) {
   if (!sdOk || !cfg.sdLoggingEnabled) return;
 
   File f = SD.open(sdLogPath, FILE_APPEND);
   if (!f) {
     sdWriteFailCount++;
+    sdConsecFail++;
     if (sdWriteFailCount == 1 || sdWriteFailCount % 10 == 0) {
       Serial.print("SD LOG WRITE FAIL count="); Serial.println(sdWriteFailCount);
+    }
+    // Card pulled / failing: stop hammering SD.open() every telemetry cycle, which
+    // would otherwise block the control loop for hundreds of ms twice a second.
+    if (sdConsecFail >= SD_MAX_CONSEC_FAIL) {
+      sdOk = false;
+      Serial.println("SD DISABLED after repeated write failures (card removed/failing).");
+      addLog("SD DISABLED (repeated write fail)");
     }
     return;
   }
 
   size_t n = f.println(line);
   f.close();
-  if (n == 0) sdWriteFailCount++;
+  if (n == 0) { sdWriteFailCount++; sdConsecFail++; }
+  else sdConsecFail = 0;
 }
 
 void sdLogEvent(const String& msg) {
@@ -1376,8 +1412,10 @@ void runTestByName(const String& nameIn) {
       }
       Serial.println("PUMP PRIME SAFETY: remove engine inlet tube and discharge fuel to container before running.");
       fuelValvesAuto(true);          // similar to ENJET oil pump test linking main fuel valve
-      pumpUs = cfg.introFuelUs;      // default 1160us ~50 ml/min
-      fuelTargetUs = cfg.introFuelUs;
+      pumpUs = cfg.pumpTestUs;       // dedicated bench prime PWM (default 1210us)
+      fuelTargetUs = cfg.pumpTestUs;
+      Serial.print("PUMP PRIME at "); Serial.print(cfg.pumpTestUs); Serial.print("us (~");
+      Serial.print(flowFromUs(cfg.pumpTestUs), 1); Serial.println(" ml/min)");
       applyOutputs();
       startTimedTest(id, 1500);
       break;
@@ -1433,7 +1471,7 @@ void updateActiveTest() {
       fuelTargetUs = ESC_SAFE_US;
       fuelValvesAuto(false);
       applyOutputs();
-      setChecklist(done, TEST_PASS, String("Pump prime completed at ") + String(cfg.introFuelUs) + "us");
+      setChecklist(done, TEST_PASS, String("Pump prime completed at ") + String(cfg.pumpTestUs) + "us");
       break;
     default:
       break;
@@ -1481,7 +1519,7 @@ String webStatusJson() {
   String ckWhy;
   bool ckOk = checklistPassedForAutoStart(ckWhy);
   String s;
-  s.reserve(896);   // pre-size to avoid repeated heap reallocations on each /api poll
+  s.reserve(2048);  // pre-size for the full payload (status + checklist + logs + cfg) to avoid heap churn per /api poll
   s = "{";
   s += "\"mode\":\"" + String(modeName(ecuMode)) + "\",";
   s += "\"stage\":\"" + String(stageName(startStage)) + "\",";
@@ -1506,6 +1544,18 @@ String webStatusJson() {
   s += "\"checklistWhy\":\"" + jsonEscape(ckWhy) + "\",";
   s += "\"sd\":\"" + String(sdOk ? (cfg.sdLoggingEnabled ? String("OK ") + sdLogPath : "OFF") : "FAIL") + "\",";
   s += "\"checklist\":" + checklistJson() + ",";
+  // Live config values so the Web UI tune inputs always reflect the actual config
+  // (prevents stale literal defaults from silently changing limits when Set is clicked).
+  s += "\"cfgIdleRpm\":\"" + String(cfg.idleRpm) + "\",";
+  s += "\"cfgMaxRpm\":\"" + String(cfg.maxRpm) + "\",";
+  s += "\"cfgMaxEgt\":\"" + String(cfg.maxEgtC) + "\",";
+  s += "\"cfgPurgeUs\":\"" + String(cfg.starterPurgeUs) + "\",";
+  s += "\"cfgSpinUs\":\"" + String(cfg.starterSpinUs) + "\",";
+  s += "\"cfgAssistUs\":\"" + String(cfg.starterAssistUs) + "\",";
+  s += "\"cfgIntroUs\":\"" + String(cfg.introFuelUs) + "\",";
+  s += "\"cfgIdleUs\":\"" + String(cfg.idleFuelUs) + "\",";
+  s += "\"cfgMaxUs\":\"" + String(cfg.maxFuelUs) + "\",";
+  s += "\"cfgPumpTestUs\":\"" + String(cfg.pumpTestUs) + "\",";
   s += "\"logs\":\"" + logsJoined() + "\"";
   s += "}";
   return s;
@@ -1533,20 +1583,21 @@ input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;p
 <div class="btns">
 <button class="btn test" onclick="cmd('test egt')">EGT</button><button class="btn test" onclick="cmd('test rpm_noise')">RPM noise</button><button class="btn test" onclick="cmd('test ign')">IGN</button><button class="btn test" onclick="cmd('test starter')">Starter</button><button class="btn test" onclick="cmd('test starter_ign')">Starter+IGN EMI</button><button class="btn test" onclick="cmd('test valve1')">Valve 1</button><button class="btn test" onclick="cmd('test valve2')">Valve 2</button><button class="btn test" onclick="cmd('test pump')">Pump prime</button><button class="btn test" onclick="cmd('confirmkill')">Confirm kill</button><button class="btn" onclick="cmd('resetcheck')">Reset checklist</button>
 </div><table><thead><tr><th>Step</th><th>Result</th><th>Note</th></tr></thead><tbody id="ck"></tbody></table>
-<h2>Tune quick set</h2><div class="row small">
-Idle RPM <input id="idlerpm" value="32000"><button class="btn" onclick="cmd('set idlerpm '+v('idlerpm'))">Set</button>
+<h2>Tune quick set <span class="small">(giá trị tự nạp từ config; PWM/limit chỉ chỉnh khi WAITING/ABORTED)</span></h2><div class="row small">
+Idle RPM <input id="idlerpm" value="42000"><button class="btn" onclick="cmd('set idlerpm '+v('idlerpm'))">Set</button>
 Max RPM <input id="maxrpm" value="110000"><button class="btn" onclick="cmd('set maxrpm '+v('maxrpm'))">Set</button>
-Max EGT <input id="maxegt" value="780"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
+Max EGT <input id="maxegt" value="680"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
 Throttle <input id="thr" value="0"><button class="btn" onclick="cmd('set throttle '+v('thr'))">Set</button>
 </div>
-<h2>Starter &amp; Fuel PWM (chỉnh trực tiếp, 1000..1500 / 1000..1300 us)</h2><div class="row small">
+<h2>Starter &amp; Fuel PWM (tự nạp từ config)</h2><div class="row small">
 Purge us <input id="purgeus" value="1100"><button class="btn" onclick="cmd('set purgeus '+v('purgeus'))">Set</button>
 Spin us <input id="spinus" value="1200"><button class="btn" onclick="cmd('set spinus '+v('spinus'))">Set</button>
 Assist us <input id="assistus" value="1200"><button class="btn" onclick="cmd('set assistus '+v('assistus'))">Set</button>
 </div><div class="row small">
-Intro/Pump us <input id="introus" value="1210"><button class="btn" onclick="cmd('set intro '+v('introus'))">Set</button>
+Intro us <input id="introus" value="1160"><button class="btn" onclick="cmd('set intro '+v('introus'))">Set</button>
 Idle us <input id="idleus" value="1175"><button class="btn" onclick="cmd('set idleus '+v('idleus'))">Set</button>
 Max us <input id="maxus" value="1260"><button class="btn" onclick="cmd('set maxus '+v('maxus'))">Set</button>
+Pump test us <input id="pumptestus" value="1210"><button class="btn" onclick="cmd('set pumptestus '+v('pumptestus'))">Set</button>
 </div>
 <h2>Starter Manual Test (no fuel/ign, bench only)</h2><div class="row small">
 PWM us <input id="sus" value="1200"> Duration ms <input id="sms" value="3000">
@@ -1558,9 +1609,13 @@ PWM us <input id="sus" value="1200"> Duration ms <input id="sms" value="3000">
 function v(id){return document.getElementById(id).value}
 function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,200))}
 function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
+function setInp(id,val){var e=document.getElementById(id);if(e&&val!==undefined&&document.activeElement!==e)e.value=val;}
 function load(){fetch('/api').then(r=>r.json()).then(d=>{let cards=[['MODE',d.mode],['STAGE',d.stage],['EGT',d.egt],['dEGT',d.degt],['RPM',d.rpm],['RPM Target',d.rtgt],['RPM Noise',d.rnoise],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['ARM',d.arm],['Checklist',d.checklistOk],['SD',d.sd],['Abort',d.abort]];
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
  document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
+ setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('maxegt',d.cfgMaxEgt);
+ setInp('purgeus',d.cfgPurgeUs);setInp('spinus',d.cfgSpinUs);setInp('assistus',d.cfgAssistUs);
+ setInp('introus',d.cfgIntroUs);setInp('idleus',d.cfgIdleUs);setInp('maxus',d.cfgMaxUs);setInp('pumptestus',d.cfgPumpTestUs);
  document.getElementById('logs').innerHTML=d.logs||'';});}
 setInterval(load,700);load();
 </script></body></html>
@@ -1645,6 +1700,11 @@ void beginAutoIdle() {
   activeTest = TEST_NONE; activeTestEndMs = 0;
   ignitionDetectedMs = 0;
   throttlePct = 0; lastAbortReason = "NONE"; starterAboveReleaseSinceMs = 0; manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0;
+  manualValve1OffAtMs = manualValve2OffAtMs = 0;
+  // Fresh comm-watchdog window for the new run; assume a remote (Serial/Web) start
+  // unless startIdleFromButton() flips this to a button run right after.
+  lastOperatorLinkMs = millis();
+  runStartedByButton = false;
   fuelTargetUs = ESC_SAFE_US;
   forceSafeOutputs(); enterMode(MODE_STARTING); enterStage(ST_PURGE);
   startUs = cfg.starterPurgeUs; pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false); applyOutputs();
@@ -1825,7 +1885,7 @@ void checkFailures() {
   // (Serial/Web command or the Web UI's automatic /api poll) within commTimeoutMs.
   // Without this, a closed browser tab or dropped serial session would leave the
   // engine running at the last commanded throttle with nothing watching it.
-  if (cfg.commWatchdogEnabled && (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) &&
+  if (cfg.commWatchdogEnabled && !runStartedByButton && (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) &&
       millis() - lastOperatorLinkMs > cfg.commTimeoutMs) { abortAll("COMM_TIMEOUT"); return; }
   if (!dryStartActive && cfg.abortOnEgtFault && !egt.ok) { abortAll("EGT_FAULT"); return; }
   if (egt.ok && egt.c >= cfg.maxEgtC) { abortAll("OVER_TEMP"); return; }
@@ -1860,6 +1920,7 @@ void printConfig() {
   Serial.print("introFuelUs="); Serial.print(cfg.introFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.introFuelUs), 1); Serial.println(" ml/min)");
   Serial.print("idleFuelUs="); Serial.print(cfg.idleFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.idleFuelUs), 1); Serial.println(" ml/min)");
   Serial.print("maxFuelUs="); Serial.print(cfg.maxFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.maxFuelUs), 1); Serial.println(" ml/min)");
+  Serial.print("pumpTestUs="); Serial.print(cfg.pumpTestUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.pumpTestUs), 1); Serial.println(" ml/min, bench pump prime)");
   Serial.print("requireChecklistForStart="); Serial.println(cfg.requireChecklistForStart ? "ON" : "OFF");
   Serial.print("allowDryStartWhenEgtFault="); Serial.println(cfg.allowDryStartWhenEgtFault ? "ON" : "OFF");
   Serial.print("dryStartRunMs="); Serial.println(cfg.dryStartRunMs);
@@ -1889,8 +1950,9 @@ void printHelp() {
   Serial.println("valve1 on/off (Start solenoid, bench-only) | valve2 on/off (Main oil valve, bench-only)");
   Serial.println("startidle             -> guarded auto-idle start sequence");
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
-  Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us>");
+  Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us> | set pumptestus <us>");
   Serial.println("set purgeus <us> | set spinus <us> | set assistus <us> -> starter crank PWM (1000..1500)");
+  Serial.println("  (all PWM/limit tuning: intro/idleus/maxus/pumptestus/purgeus/spinus/assistus/idlerpm/maxrpm/rpmtol/maxegt only in WAITING/ABORTED)");
   Serial.println("set idlerpm <rpm> | set maxrpm <rpm> | set rpmtol <rpm> | set maxegt <C>");
   Serial.println("set acceltoidlems <ms> | set cooldownms <minMs> <timeoutMs> | set cooltarget <C> | set coolstarter <us>");
   Serial.println("set throttle <0..100> | set accelms <ms> | set decelms <ms> | set lowaccelms <ms> | set lowdecelms <ms>");
@@ -1993,6 +2055,7 @@ bool parseTwoInts(const String& cmd, int& a, uint32_t& b) {
 
 void handleCommand(String cmd) {
   lastOperatorLinkMs = millis();  // any Serial/Web command counts as proof the operator is present
+  runStartedByButton = false;     // a remote operator is now driving -> comm watchdog applies again
   cmd.trim(); cmd.toLowerCase(); if (!cmd.length()) return;
   if (cmd == "help") { printHelp(); return; }
   if (cmd == "status") { printStatus(true); return; }
@@ -2085,10 +2148,10 @@ void handleCommand(String cmd) {
     return;
   }
 
-  if (cmd == "valve1 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } valve1Cmd = true; applyOutputs(); Serial.println("VALVE1 ON"); return; }
-  if (cmd == "valve1 off") { valve1Cmd = false; applyOutputs(); Serial.println("VALVE1 OFF"); return; }
-  if (cmd == "valve2 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } valve2Cmd = true; applyOutputs(); Serial.println("VALVE2 ON"); return; }
-  if (cmd == "valve2 off") { valve2Cmd = false; applyOutputs(); Serial.println("VALVE2 OFF"); return; }
+  if (cmd == "valve1 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } valve1Cmd = true; manualValve1OffAtMs = millis() + VALVE_TEST_TIMEOUT_MS; applyOutputs(); Serial.println("VALVE1 ON (auto-off 10s)"); return; }
+  if (cmd == "valve1 off") { valve1Cmd = false; manualValve1OffAtMs = 0; applyOutputs(); Serial.println("VALVE1 OFF"); return; }
+  if (cmd == "valve2 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } valve2Cmd = true; manualValve2OffAtMs = millis() + VALVE_TEST_TIMEOUT_MS; applyOutputs(); Serial.println("VALVE2 ON (auto-off 10s)"); return; }
+  if (cmd == "valve2 off") { valve2Cmd = false; manualValve2OffAtMs = 0; applyOutputs(); Serial.println("VALVE2 OFF"); return; }
 
   if (cmd.startsWith("set rpmfilter ")) {
     int f = numberAfter(cmd, "set rpmfilter ");
@@ -2117,9 +2180,21 @@ void handleCommand(String cmd) {
   if (cmd == "set egtstart strict") { cfg.allowDryStartWhenEgtFault = false; Serial.println("EGT start mode = STRICT: EGT fault blocks startidle."); addLog("EGT START MODE STRICT"); return; }
   if (cmd.startsWith("set drystartms ")) { int v = numberAfter(cmd, "set drystartms "); if (v < 1000 || v > 15000) { Serial.println("ERROR: drystartms 1000..15000"); return; } cfg.dryStartRunMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set ppr ")) { int p = numberAfter(cmd, "set ppr "); if (p != 1 && p != 2) { Serial.println("ERROR: ppr 1 or 2"); return; } cfg.pulsesPerRev = p; Serial.println("OK"); return; }
+  // Bench-only tuning guard: block PWM / RPM / EGT-limit setters while the engine
+  // is running, so a stray Serial/Web command cannot move a live setpoint or the
+  // protection envelope. Tune in WAITING/ABORTED only.
+  if ((cmd.startsWith("set intro ") || cmd.startsWith("set idleus ") || cmd.startsWith("set maxus ") ||
+       cmd.startsWith("set purgeus ") || cmd.startsWith("set spinus ") || cmd.startsWith("set assistus ") ||
+       cmd.startsWith("set idlerpm ") || cmd.startsWith("set maxrpm ") || cmd.startsWith("set rpmtol ") ||
+       cmd.startsWith("set maxegt ") || cmd.startsWith("set pumptestus ")) &&
+      ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) {
+    Serial.println("ERROR: PWM/limit tuning only in WAITING/ABORTED (not while running).");
+    return;
+  }
   if (cmd.startsWith("set intro ")) { int us = numberAfter(cmd, "set intro "); if (us < 1000 || us > 1250) { Serial.println("ERROR: intro 1000..1250"); return; } cfg.introFuelUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set idleus ")) { int us = numberAfter(cmd, "set idleus "); if (us < 1000 || us > 1270) { Serial.println("ERROR: idleus 1000..1270"); return; } cfg.idleFuelUs = us; if (cfg.maxFuelUs < us) cfg.maxFuelUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set maxus ")) { int us = numberAfter(cmd, "set maxus "); if (us < 1100 || us > 1300) { Serial.println("ERROR: maxus 1100..1300"); return; } cfg.maxFuelUs = max(us, cfg.idleFuelUs); Serial.println("OK"); return; }
+  if (cmd.startsWith("set pumptestus ")) { int us = numberAfter(cmd, "set pumptestus "); if (us < 1000 || us > 1225) { Serial.println("ERROR: pumptestus 1000..1225"); return; } cfg.pumpTestUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set purgeus ")) { int us = numberAfter(cmd, "set purgeus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: purgeus 1000..1500"); return; } cfg.starterPurgeUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set spinus ")) { int us = numberAfter(cmd, "set spinus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: spinus 1000..1500"); return; } cfg.starterSpinUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set assistus ")) { int us = numberAfter(cmd, "set assistus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: assistus 1000..1500"); return; } cfg.starterAssistUs = us; Serial.println("OK"); return; }
@@ -2188,6 +2263,8 @@ void loop() {
   if (manualIgnOffAtMs > 0 && millis() >= manualIgnOffAtMs) { ignCmd = false; manualIgnOffAtMs = 0; applyOutputs(); Serial.println("GLOW AUTO OFF."); }
   if (manualStartOffAtMs > 0 && millis() >= manualStartOffAtMs) { startUs = ESC_SAFE_US; manualStartOffAtMs = 0; applyOutputs(); Serial.println("STARTER AUTO OFF."); }
   if (manualPumpOffAtMs > 0 && millis() >= manualPumpOffAtMs) { pumpUs = ESC_SAFE_US; fuelTargetUs = ESC_SAFE_US; fuelValvesAuto(false); manualPumpOffAtMs = 0; applyOutputs(); Serial.println("PUMP AUTO OFF."); }
+  if (manualValve1OffAtMs > 0 && millis() >= manualValve1OffAtMs) { valve1Cmd = false; manualValve1OffAtMs = 0; applyOutputs(); Serial.println("VALVE1 AUTO OFF."); }
+  if (manualValve2OffAtMs > 0 && millis() >= manualValve2OffAtMs) { valve2Cmd = false; manualValve2OffAtMs = 0; applyOutputs(); Serial.println("VALVE2 AUTO OFF."); }
   updateActiveTest();
   isStage2Armed();
   updateRpm(); updateEgt();

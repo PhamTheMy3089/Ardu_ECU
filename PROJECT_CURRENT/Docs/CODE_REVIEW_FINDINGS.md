@@ -288,6 +288,49 @@ warning) + mô phỏng chèn auto-prototype kiểu Arduino cho firmware chính (
 
 ---
 
+# 🔎 Review toàn project + fix an toàn (2026-07-18)
+
+Review 4 mảng bằng agent song song (state machine, cảm biến/ISR/EGT/fuel,
+Web UI/SD/command, TEST_STARTER). Xác nhận **không** có đọc ISR uint64 hở,
+**không** chia 0, LEDC duty đúng, gỡ kick sạch. Đã fix các lỗi sau:
+
+**HIGH**
+- **#1/#2 Web UI default lệch config**: `Max EGT` hiển thị 780 (config 680),
+  `Idle RPM` 32000 (config 42000) → bấm Set là âm thầm đổi ngưỡng bảo vệ.
+  Fix: sửa default khớp config **và** thêm field `cfg*` vào `/api`, JS `setInp()`
+  tự nạp mọi ô tune từ config mỗi poll (không ghi đè khi đang gõ).
+- **#3 `stop` từ ABORTED** xóa lý do lỗi + quay starter, rò ABORTED→WAITING bỏ
+  qua interlock. Fix: `requestStop()` chỉ tác dụng khi STARTING/IDLING/OPERATING.
+- **#4 Start bằng nút bị comm-watchdog abort ngay khi vào IDLING**. Fix: cờ
+  `runStartedByButton` (bỏ qua watchdog cho run bằng nút; re-engage khi có lệnh
+  remote) + reset `lastOperatorLinkMs` trong `beginAutoIdle`.
+- **#5 Lệnh `set` an toàn không bị chặn khi chạy**. Fix: chặn tune PWM/limit
+  (intro/idleus/maxus/pumptestus/purgeus/spinus/assistus/idlerpm/maxrpm/rpmtol/
+  maxegt) — chỉ nhận khi WAITING/ABORTED.
+
+**MEDIUM**
+- **#6/#7 intro>idle + pump test ~3x fuel**: **tách** `pumpTestUs`(1210, bench
+  prime) khỏi `introFuelUs`(khôi phục 1160 < idle). `test pump` dùng `pumpTestUs`;
+  thêm `set pumptestus` + ô Web UI; sửa comment/thông báo flow.
+- **#11 `off` từ ABORTED** rời ABORTED không set ack. Fix: `stage2Off()` ở ABORTED
+  chỉ re-assert safe, yêu cầu `clearabort`.
+- **#9 SD telemetry blocking**: `sdAppendLine` đếm lỗi liên tiếp, sau 5 lần đặt
+  `sdOk=false` (ngừng block loop khi rút thẻ). *(Slow-card vẫn cần task riêng.)*
+
+**LOW**
+- **#15** nới `webStatusJson reserve` 896→2048, `sdCsvLine` 240→320.
+- **#16** `valve1/valve2 on` auto-off sau 10s (`VALVE_TEST_TIMEOUT_MS`).
+
+**Còn để lại (chưa fix, low)**: #10 watchdog thỏa mãn bởi auto-poll, #12
+overspeed/flameout gate sau NOISY (được RPM_SIGNAL_LOST cứu), #14 SoftAP mật khẩu
+yếu, #17 ABORTED chưa chặn EGT nóng cho ign/starter, #18 không phát hiện EGT
+đóng băng, #19 micros()==0 sentinel, #20 jsonEscape control chars.
+
+**Verify**: compile sạch (`g++ -fsyntax-only -Wall -Wextra`) + mô phỏng
+auto-prototype Arduino cho firmware chính.
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-18 (gỡ starter kick, starterSpinUs=1200, introFuelUs=1210)
+**Lần cập nhật**: 2026-07-18 (review toàn project + fix an toàn HIGH/MEDIUM/LOW)
