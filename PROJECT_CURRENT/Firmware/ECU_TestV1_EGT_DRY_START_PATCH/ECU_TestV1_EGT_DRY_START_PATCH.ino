@@ -130,6 +130,7 @@ static const uint32_t RPM_SIGNAL_TIMEOUT_MS = 1000;
 // This prevents 1-3 fake pulses from being interpreted as 250..1500 RPM.
 static const uint32_t RPM_REST_GUARD_MAX_US = ESC_SAFE_US + 5;
 static const uint32_t EGT_READ_PERIOD_MS = 120;
+static const uint32_t EGT_STUCK_WARN_MS = 6000;  // warn (log only) if EGT reads frozen this long while combusting
 static const uint32_t STATUS_PRINT_MS = 250;
 static const uint32_t STAGE2_ARM_TIME_MS = 10000;
 static const uint32_t STARTER_PROVE_TIMEOUT_MS = 1500;
@@ -354,8 +355,12 @@ uint32_t lastStatusPrintMs = 0;
 bool rpmDetailMode = false;   // OFF by default: basic status line only
 
 // ===== Web UI =====
+// SECURITY: anyone who joins this SoftAP can arm and start the real engine via
+// /cmd (there is no per-command auth). CHANGE WEB_PASS to a strong, private value
+// before any live-engine use, and only power the AP up when you intend to operate.
+// The default below is a weak placeholder for bench bring-up only.
 static const char* WEB_SSID = "ECU_TestV1";
-static const char* WEB_PASS = "admin1234";
+static const char* WEB_PASS = "admin1234";   // <-- CHANGE ME (min 8 chars) before real runs
 IPAddress webIp(192, 168, 4, 1);
 IPAddress webGateway(192, 168, 4, 1);
 IPAddress webSubnet(255, 255, 255, 0);
@@ -913,6 +918,7 @@ bool rpmSignalRecentWithin(uint32_t timeoutMs) {
 
 void IRAM_ATTR rpmISR() {
   uint32_t nowUs = micros();
+  if (nowUs == 0) nowUs = 1;   // 0 is the "no edge yet" sentinel; avoid it at the ~71min micros() wrap
   isrRawEdges++;
 
   if (isrLastRawEdgeUs == 0) {
@@ -1102,6 +1108,28 @@ void updateEgt() {
     if (dtS > 0.05f) egt.gradientCps = ((float)tc - egt.c) / dtS;
   } else egt.gradientCps = 0;
   egt.prevC = egt.c; egt.c = (float)tc; egt.ok = true; egt.fault = 0; egt.lastGoodMs = nowMs;
+
+  // Frozen-sensor heuristic (LOG ONLY - never aborts, to avoid false shutdowns on a
+  // legitimately steady EGT). A live thermocouple always fluctuates during combustion;
+  // if the reading is byte-for-byte unchanged for EGT_STUCK_WARN_MS while fuel is
+  // flowing and the core is hot, warn once. A frozen-but-plausible value would not
+  // trip the MAX31855 open/short fault path, so this is the only hint of it.
+  static float egtStuckVal = NAN;
+  static uint32_t egtStuckSinceMs = 0;
+  static bool egtStuckWarned = false;
+  bool combusting = (egt.c > (float)cfg.ignitionThresholdC) &&
+                    ((pumpUs > ESC_SAFE_US + 10) || valve1Cmd || valve2Cmd);
+  if (combusting && !isnan(egtStuckVal) && egt.c == egtStuckVal) {
+    if (!egtStuckWarned && (nowMs - egtStuckSinceMs) >= EGT_STUCK_WARN_MS) {
+      addLog("WARN: EGT frozen while combusting - check thermocouple");
+      Serial.println("WARNING: EGT unchanged too long while fueled - possible frozen/stuck thermocouple.");
+      egtStuckWarned = true;
+    }
+  } else {
+    egtStuckVal = egt.c;
+    egtStuckSinceMs = nowMs;
+    egtStuckWarned = false;
+  }
 }
 
 
@@ -1520,7 +1548,13 @@ String jsonEscape(const String& in) {
     if (c == '\\') out += "\\\\";
     else if (c == '"') out += "\\\"";
     else if (c == '\n') out += "\\n";
-    else if (c == '\r') out += "";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\t') out += "\\t";
+    else if ((uint8_t)c < 0x20) {
+      // Any other control char would produce invalid JSON; emit \u00XX.
+      static const char hex[] = "0123456789abcdef";
+      out += "\\u00"; out += hex[((uint8_t)c >> 4) & 0xF]; out += hex[(uint8_t)c & 0xF];
+    }
     else out += c;
   }
   return out;
@@ -1644,7 +1678,7 @@ function v(id){return document.getElementById(id).value}
 function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,200))}
 function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
 function setInp(id,val){var e=document.getElementById(id);if(e&&val!==undefined&&document.activeElement!==e)e.value=val;}
-function load(){fetch('/api').then(r=>r.json()).then(d=>{let cards=[['MODE',d.mode],['STAGE',d.stage],['EGT',d.egt],['dEGT',d.degt],['RPM',d.rpm],['RPM Target',d.rtgt],['RPM Noise',d.rnoise],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['ARM',d.arm],['Checklist',d.checklistOk],['SD',d.sd],['Abort',d.abort]];
+function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).then(d=>{let cards=[['MODE',d.mode],['STAGE',d.stage],['EGT',d.egt],['dEGT',d.degt],['RPM',d.rpm],['RPM Target',d.rtgt],['RPM Noise',d.rnoise],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['ARM',d.arm],['Checklist',d.checklistOk],['SD',d.sd],['Abort',d.abort]];
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
  document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
  setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('maxegt',d.cfgMaxEgt);
@@ -1659,7 +1693,14 @@ setInterval(load,700);load();
 void setupWebServer() {
   if (webRoutesReady) return;
   server.on("/", []() { server.send(200, "text/html", htmlPage()); });
-  server.on("/api", []() { lastOperatorLinkMs = millis(); server.send(200, "application/json", webStatusJson()); });
+  server.on("/api", []() {
+    // Only a poll from a VISIBLE dashboard tab counts as operator presence for the
+    // comm watchdog. The page sends act=0 when hidden/backgrounded (phone locked,
+    // tab switched) so a walked-away session times out instead of being kept alive
+    // forever by a background poll. Missing arg (old cached page) = treat as active.
+    if (server.arg("act") != "0") lastOperatorLinkMs = millis();
+    server.send(200, "application/json", webStatusJson());
+  });
   server.on("/cmd", []() {
     String c = server.hasArg("c") ? server.arg("c") : "";
     if (c.length()) handleCommand(c);
@@ -2164,6 +2205,14 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("ignpulse ")) {
     if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; }
     if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: ignpulse only while WAITING/ABORTED."); return; }
+    // Do not energize the igniter into a still-hot engine (e.g. ABORTED after a
+    // cooldown timeout that expired while hot): residual fuel + a hot core is a
+    // re-light hazard. Starter-only tests below stay allowed (they aid cooling).
+    if (fuelCommandBlockedByHotEgt()) {
+      Serial.print("IGNPULSE BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
+      Serial.print("C > cooldown target "); Serial.print(cfg.cooldownTargetC); Serial.println("C).");
+      return;
+    }
     uint32_t ms = numberAfter(cmd, "ignpulse "); if (ms < 500 || ms > 3000) { Serial.println("ERROR: ignpulse 500..3000 ms"); return; }
     ignCmd = true; manualIgnOffAtMs = millis() + ms; applyOutputs(); Serial.print("GLOW ON for "); Serial.print(ms); Serial.println(" ms"); return;
   }
@@ -2210,9 +2259,9 @@ void handleCommand(String cmd) {
     return;
   }
 
-  if (cmd == "valve1 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } valve1Cmd = true; manualValve1OffAtMs = millis() + VALVE_TEST_TIMEOUT_MS; applyOutputs(); Serial.println("VALVE1 ON (auto-off 10s)"); return; }
+  if (cmd == "valve1 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE1 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve1Cmd = true; manualValve1OffAtMs = millis() + VALVE_TEST_TIMEOUT_MS; applyOutputs(); Serial.println("VALVE1 ON (auto-off 10s)"); return; }
   if (cmd == "valve1 off") { valve1Cmd = false; manualValve1OffAtMs = 0; applyOutputs(); Serial.println("VALVE1 OFF"); return; }
-  if (cmd == "valve2 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } valve2Cmd = true; manualValve2OffAtMs = millis() + VALVE_TEST_TIMEOUT_MS; applyOutputs(); Serial.println("VALVE2 ON (auto-off 10s)"); return; }
+  if (cmd == "valve2 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE2 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve2Cmd = true; manualValve2OffAtMs = millis() + VALVE_TEST_TIMEOUT_MS; applyOutputs(); Serial.println("VALVE2 ON (auto-off 10s)"); return; }
   if (cmd == "valve2 off") { valve2Cmd = false; manualValve2OffAtMs = 0; applyOutputs(); Serial.println("VALVE2 OFF"); return; }
 
   if (cmd.startsWith("set rpmfilter ")) {

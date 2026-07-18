@@ -372,6 +372,25 @@ auto-prototype Arduino (OK).
 
 ---
 
+# 🔻 Xử lý nốt các mục LOW (2026-07-18c)
+
+- **#17** Chặn `ignpulse` và `valve1/valve2 on` khi EGT còn nóng (`fuelCommandBlockedByHotEgt`)
+  — không cho châm lửa/mở van vào lõi nóng ở ABORTED. `starttest` (chỉ starter, giúp làm mát) giữ nguyên.
+- **#18** Cảnh báo **log-only** (không abort) khi EGT đứng yên byte-for-byte > `EGT_STUCK_WARN_MS`
+  lúc đang cháy → gợi ý thermocouple đóng băng (loại lỗi mà fault open/short không bắt được).
+- **#19** ISR ép `micros()` khác 0 (bỏ va chạm sentinel "chưa có cạnh" mỗi ~71 phút) — cả 2 firmware.
+- **#20** `jsonEscape` xử lý mọi ký tự control (`\r`/`\t`/`\u00XX`) → JSON không vỡ.
+- **#14** Thêm ghi chú bảo mật + đánh dấu `WEB_PASS` cần đổi trước khi chạy thật (cả 2 firmware);
+  không tự đổi mật khẩu (giữ credential người dùng đang dùng).
+- **#10** `/api` chỉ tính là "operator hiện diện" khi tab đang hiển thị (client gửi `act=0` khi
+  ẩn/khoá màn hình) → phiên bỏ đi sẽ time-out thay vì bị auto-poll giữ sống mãi. Tương thích ngược.
+- **#12** Không sửa: overspeed/flameout khi NOISY đã được `RPM_SIGNAL_LOST` bao (NOISY + có nhiên
+  liệu → abort cắt nhiên liệu), nên đã an toàn.
+
+**Verify**: compile sạch (`g++ -fsyntax-only -Wall -Wextra`) + mô phỏng auto-prototype Arduino.
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-18b (quét vòng 2 + fix logic điều khiển #1–8)
+**Lần cập nhật**: 2026-07-18c (xử lý các mục LOW còn lại)
