@@ -138,6 +138,11 @@ static const uint32_t VALVE_TEST_TIMEOUT_MS = 10000;  // bench valve1/valve2 "on
 // Faster RPM-loss detection while fueled at running RPM (IDLING/OPERATING), so fuel
 // is cut promptly after a real flameout instead of waiting the full 1s signal timeout.
 static const uint32_t FUELED_RPM_LOSS_TIMEOUT_MS = 400;
+// While running (IDLING/OPERATING), pulses are still arriving but the signal is
+// classified NOISY: require it to persist this long before RPM_SIGNAL_LOST, so a
+// single transient EMI burst (one ~100ms window) can't false-abort a healthy
+// engine. A genuine loss of pulses is still caught by the recency check above.
+static const uint32_t RPM_NOISY_ABORT_MS = 300;
 // Short EGT look-ahead used only by the OVER_TEMP hard abort, to compensate for the
 // ~1-sample (EGT_READ_PERIOD_MS) staleness of egt.c so a fast rise cannot overshoot
 // maxEgtC by ~one sample before the abort reacts. Deliberately small (not the 3s
@@ -254,6 +259,7 @@ EcuMode ecuMode = MODE_WAITING;
 StartStage startStage = ST_NONE;
 uint32_t modeEnteredMs = 0, stageEnteredMs = 0, starterAboveReleaseSinceMs = 0, lastPumpStepMs = 0;
 uint32_t runningSinceMs = 0;  // first time stable IDLING was reached this run; NOT reset by IDLING<->OPERATING toggles (flameout grace anchor)
+uint32_t rpmStatsResetAtMs = 0;  // last resetRpmStats(); RPM_SIGNAL_LOST is suppressed briefly after so a reset can't look like signal loss
 uint32_t ignitionDetectedMs = 0;  // set when EGT crosses ignition threshold; anchors the post-ignition RPM-rise check
 bool cooldownAfterAbort = false;
 bool stage2Armed = false;
@@ -479,7 +485,10 @@ const char* rpmSignalName() {
 RpmNoiseLevel classifyRpmNoise(bool recent, uint32_t raw, uint32_t accepted, uint32_t rejected,
                                float rejectPct, float jitterPct, float rpmDiffPct, uint32_t intervals) {
   if (!recent && raw == 0) return RPM_NO_SIGNAL;
-  if (raw > 0 && accepted == 0) return RPM_NOISY;
+  // raw>1 (not just the single priming edge after a reset) with nothing accepted =
+  // pulses arriving but all rejected as glitches -> genuinely noisy. A lone first
+  // edge (raw==1, accepted==0) is the normal post-reset priming case, not noise.
+  if (raw > 1 && accepted == 0) return RPM_NOISY;
   if (rejected >= 3 || rejectPct > 20.0f ||
       (intervals >= 5 && jitterPct > 30.0f) ||
       (rpmDiffPct > 30.0f)) return RPM_NOISY;
@@ -619,6 +628,13 @@ void stage2Off() {
     // require an explicit clearabort (which sets abortAcknowledged).
     forceSafeOutputs();
     Serial.println("SAFE OFF: already safe in ABORTED. Use 'clearabort' to acknowledge the fault before re-arm.");
+    return;
+  }
+  if (ecuMode == MODE_COOLDOWN && cooldownAfterAbort) {
+    // This cooldown is heading to ABORTED. Do not let SAFE OFF short-circuit it to
+    // WAITING (that would wipe the fault reason, skip the clearabort interlock, AND
+    // cut the cooling airflow on a hot engine). Let the cooldown finish -> ABORTED.
+    Serial.println("SAFE OFF ignored during post-abort cooldown. It will finish -> ABORTED; use 'clearabort' to acknowledge.");
     return;
   }
   stage2Armed = false;
@@ -980,6 +996,9 @@ void resetRpmStats() {
   isrMaxDtUs = 0;
   interrupts();
   rpmData = RpmState();
+  // Grace so a stats reset (isrLastAcceptedPulseUs zeroed until the next edge) can't
+  // momentarily read as "signal lost" and false-abort a running engine.
+  rpmStatsResetAtMs = millis();
   Serial.println("RPM stats reset.");
 }
 
@@ -1018,6 +1037,7 @@ void updateRpm() {
   // prevents a uint32_t wraparound in the signalRecent computation below when the
   // ISR fires between capturing the time and entering the critical section.
   uint32_t nowUs = micros();
+  if (nowUs == 0) nowUs = 1;   // 0 is the "first window" sentinel for lastComputedUs; avoid it at the micros() wrap
   uint32_t windowUs = (rpmData.lastComputedUs == 0) ? (RPM_SAMPLE_MS * 1000UL) : (nowUs - rpmData.lastComputedUs);
   rpmData.lastComputedUs = nowUs;
   rpmData.lastComputedMs = nowMs;
@@ -1433,6 +1453,18 @@ void runTestByName(const String& nameIn) {
 
   if (!requireArmAndIdleForTest(id)) return;
 
+  // Igniter / fuel-valve tests must not energize into a still-hot engine (re-light
+  // or fuel-into-hot-core hazard), matching the direct ignpulse / valve-on guards.
+  // Starter-only test is exempt (it aids cooling); pump test has its own guard below.
+  if ((id == TEST_IGN || id == TEST_STARTER_IGN || id == TEST_VALVE1 || id == TEST_VALVE2) &&
+      fuelCommandBlockedByHotEgt()) {
+    Serial.print("TEST BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
+    Serial.print("C > cooldown target "); Serial.print(cfg.cooldownTargetC); Serial.println("C).");
+    setChecklist(id, TEST_FAIL, "Blocked: EGT too hot");
+    activeTest = TEST_NONE;
+    return;
+  }
+
   addLog(String("TEST START ") + checklist[id].name);
 
   switch (id) {
@@ -1587,7 +1619,7 @@ String webStatusJson() {
   String ckWhy;
   bool ckOk = checklistPassedForAutoStart(ckWhy);
   String s;
-  s.reserve(2560);  // pre-size for the full payload (status + checklist + 16 logs + cfg) to avoid heap churn per /api poll
+  s.reserve(3072);  // pre-size for the worst-case payload (status + checklist + 16 long logs + cfg) to avoid heap churn per /api poll
   s = "{";
   s += "\"mode\":\"" + String(modeName(ecuMode)) + "\",";
   s += "\"stage\":\"" + String(stageName(startStage)) + "\",";
@@ -1817,7 +1849,7 @@ void updateDryStarting() {
     case ST_SPINUP_PREHEAT:
       startUs = cfg.starterSpinUs;
       if (cfg.requireRpmForStart && millis() - stageEnteredMs > STARTER_PROVE_TIMEOUT_MS &&
-          (!rpmMeasurementUsable() || rpmData.rpm < cfg.starterProveMinRpm)) {
+          (!rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS) || rpmData.rpm < cfg.starterProveMinRpm)) {
         abortAll("DRY_NO_STARTER_RPM");
         return;
       }
@@ -1869,7 +1901,7 @@ void updateStarting() {
       break;
     case ST_SPINUP_PREHEAT:
       startUs = cfg.starterSpinUs; pumpUs = ESC_SAFE_US; ignCmd = true; fuelValvesAuto(false);
-      if (cfg.requireRpmForStart && millis() - stageEnteredMs > STARTER_PROVE_TIMEOUT_MS && (!rpmMeasurementUsable() || rpmData.rpm < cfg.starterProveMinRpm)) { abortAll("NO_STARTER_RPM"); return; }
+      if (cfg.requireRpmForStart && millis() - stageEnteredMs > STARTER_PROVE_TIMEOUT_MS && (!rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS) || rpmData.rpm < cfg.starterProveMinRpm)) { abortAll("NO_STARTER_RPM"); return; }
       if (millis() - stageEnteredMs >= cfg.preheatMs) { enterStage(ST_INTRO_FUEL); Serial.println("START STAGE -> INTRO_FUEL"); }
       break;
     case ST_INTRO_FUEL:
@@ -1964,13 +1996,15 @@ void checkFailures() {
 
   bool fueled = (pumpUs > ESC_SAFE_US + 10) || valve1Cmd || valve2Cmd;
 
-  // Comm watchdog: while fuel is flowing, require a live operator link (Serial/Web
-  // command or the Web UI's automatic /api poll) within commTimeoutMs. Covers
-  // IDLING/OPERATING and the fuel-flowing STARTING stages (INTRO_FUEL onward), so a
-  // dropped link during a start does not leave the engine fueling unattended. Dry
-  // early stages (PURGE/SPINUP, fueled=false) and button-started runs are exempt.
+  // Comm watchdog: once the engine is RUNNING (IDLING/OPERATING) at a commanded
+  // throttle, require a live operator link (Serial/Web command, or a visible Web UI
+  // /api poll) within commTimeoutMs, so a dropped link can't leave it running
+  // unattended. MODE_STARTING is deliberately NOT covered: the automated start
+  // sequence takes longer than commTimeoutMs and nothing refreshes the link during
+  // it, so covering it false-aborts a legitimate Serial-only start; the start is
+  // instead bounded by the per-stage timeouts. Button-started runs are exempt.
   if (cfg.commWatchdogEnabled && !runStartedByButton &&
-      (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING || (ecuMode == MODE_STARTING && fueled)) &&
+      (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) &&
       millis() - lastOperatorLinkMs > cfg.commTimeoutMs) { abortAll("COMM_TIMEOUT"); return; }
 
   if (!dryStartActive && cfg.abortOnEgtFault && !egt.ok) { abortAll("EGT_FAULT"); return; }
@@ -1987,13 +2021,35 @@ void checkFailures() {
   //    a start. A truly dead sensor still trips via recency.
   //  - IDLING/OPERATING (running RPM): use the shorter FUELED_RPM_LOSS_TIMEOUT_MS so
   //    fuel is cut promptly after a real flameout instead of ~1s later.
-  if (cfg.abortOnRpmFault && fueled) {
+  static uint32_t rpmNoisySinceMs = 0;   // debounce for NOISY-but-present while running
+  // Suppress RPM_SIGNAL_LOST for one loss-timeout after a stats reset (rpmreset /
+  // set rpmfilter / set rpmedge / stage transitions): resetRpmStats() zeroes the
+  // last-accepted timestamp until the next edge, which would otherwise read as a
+  // signal loss and false-abort a running engine.
+  if (cfg.abortOnRpmFault && fueled && (millis() - rpmStatsResetAtMs >= FUELED_RPM_LOSS_TIMEOUT_MS)) {
     bool lost = false;
-    if (ecuMode == MODE_STARTING)
+    if (ecuMode == MODE_STARTING) {
       lost = !rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS);
-    else if (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING)
-      lost = (!rpmMeasurementUsable() || !rpmSignalRecentWithin(FUELED_RPM_LOSS_TIMEOUT_MS));
+      rpmNoisySinceMs = 0;
+    } else if (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) {
+      if (!rpmSignalRecentWithin(FUELED_RPM_LOSS_TIMEOUT_MS)) {
+        lost = true;                       // real: no accepted pulse within 400ms
+        rpmNoisySinceMs = 0;
+      } else if (!rpmMeasurementUsable()) {
+        // Pulses still arriving but classified NOISY. Debounce: only abort if it
+        // persists >= RPM_NOISY_ABORT_MS, so a one-window EMI blip doesn't shut
+        // down a healthy running engine.
+        if (rpmNoisySinceMs == 0) rpmNoisySinceMs = millis();
+        if (millis() - rpmNoisySinceMs >= RPM_NOISY_ABORT_MS) lost = true;
+      } else {
+        rpmNoisySinceMs = 0;               // signal usable again
+      }
+    } else {
+      rpmNoisySinceMs = 0;
+    }
     if (lost) { abortAll("RPM_SIGNAL_LOST"); return; }
+  } else {
+    rpmNoisySinceMs = 0;
   }
 
   // Flameout grace is anchored to runningSinceMs (first stable idle of the run), not
@@ -2290,7 +2346,7 @@ void handleCommand(String cmd) {
   if (cmd == "set egtstart dry") { cfg.allowDryStartWhenEgtFault = true; Serial.println("EGT start mode = DRY: EGT fault converts startidle to dry starter/RPM test, no fuel/valves/ign."); addLog("EGT START MODE DRY"); return; }
   if (cmd == "set egtstart strict") { cfg.allowDryStartWhenEgtFault = false; Serial.println("EGT start mode = STRICT: EGT fault blocks startidle."); addLog("EGT START MODE STRICT"); return; }
   if (cmd.startsWith("set drystartms ")) { int v = numberAfter(cmd, "set drystartms "); if (v < 1000 || v > 15000) { Serial.println("ERROR: drystartms 1000..15000"); return; } cfg.dryStartRunMs = (uint32_t)v; Serial.println("OK"); return; }
-  if (cmd.startsWith("set ppr ")) { int p = numberAfter(cmd, "set ppr "); if (p != 1 && p != 2) { Serial.println("ERROR: ppr 1 or 2"); return; } cfg.pulsesPerRev = p; Serial.println("OK"); return; }
+  if (cmd.startsWith("set ppr ")) { if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: set ppr only in WAITING/ABORTED (rescales live RPM)."); return; } int p = numberAfter(cmd, "set ppr "); if (p != 1 && p != 2) { Serial.println("ERROR: ppr 1 or 2"); return; } cfg.pulsesPerRev = p; resetRpmStats(); Serial.println("OK"); return; }
   // Bench-only tuning guard: block PWM / RPM / EGT-limit setters while the engine
   // is running, so a stray Serial/Web command cannot move a live setpoint or the
   // protection envelope. Tune in WAITING/ABORTED only.
@@ -2309,7 +2365,7 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set purgeus ")) { int us = numberAfter(cmd, "set purgeus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: purgeus 1000..1500"); return; } cfg.starterPurgeUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set spinus ")) { int us = numberAfter(cmd, "set spinus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: spinus 1000..1500"); return; } cfg.starterSpinUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set assistus ")) { int us = numberAfter(cmd, "set assistus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: assistus 1000..1500"); return; } cfg.starterAssistUs = us; Serial.println("OK"); return; }
-  if (cmd.startsWith("set idlerpm ")) { int r = numberAfter(cmd, "set idlerpm "); if (r < 10000 || r > 60000) { Serial.println("ERROR: idlerpm 10000..60000"); return; } cfg.idleRpm = r; Serial.println("OK"); return; }
+  if (cmd.startsWith("set idlerpm ")) { int r = numberAfter(cmd, "set idlerpm "); if (r < 10000 || r > 60000) { Serial.println("ERROR: idlerpm 10000..60000"); return; } if (r > cfg.maxRpm - 5000) { Serial.println("ERROR: idlerpm must be <= maxRpm-5000"); return; } cfg.idleRpm = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set maxrpm ")) { int r = numberAfter(cmd, "set maxrpm "); if (r < cfg.idleRpm + 5000 || r > 160000) { Serial.println("ERROR: maxrpm must be idleRpm+5000..160000"); return; } cfg.maxRpm = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set rpmtol ")) { int r = numberAfter(cmd, "set rpmtol "); if (r < 500 || r > 15000) { Serial.println("ERROR: rpmtol 500..15000"); return; } cfg.rpmTolerance = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set maxegt ")) { int t = numberAfter(cmd, "set maxegt "); if (t < 400 || t > 950) { Serial.println("ERROR: maxegt 400..950"); return; } cfg.maxEgtC = t; Serial.println("OK"); return; }
@@ -2317,7 +2373,18 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set acceltoidlems ")) { int v = numberAfter(cmd, "set acceltoidlems "); if (v < 5000 || v > 60000) { Serial.println("ERROR: acceltoidlems 5000..60000"); return; } cfg.accelToIdleTimeoutMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set cooltarget ")) { int v = numberAfter(cmd, "set cooltarget "); if (v < 50 || v > 250) { Serial.println("ERROR: cooltarget 50..250 C"); return; } cfg.cooldownTargetC = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set coolstarter ")) { int v = numberAfter(cmd, "set coolstarter "); if (v < 1000 || v > 1200) { Serial.println("ERROR: coolstarter 1000..1200 us"); return; } cfg.cooldownStarterUs = v; Serial.println("OK"); return; }
-  if (cmd.startsWith("set cooldownms ")) { int minMs; uint32_t timeoutMs; if (!parseTwoInts(cmd, minMs, timeoutMs)) { Serial.println("ERROR: use set cooldownms <minMs> <timeoutMs>"); return; } if (minMs < 1000 || minMs > 30000 || timeoutMs < 5000 || timeoutMs > 120000 || timeoutMs < (uint32_t)minMs) { Serial.println("ERROR: minMs 1000..30000, timeoutMs 5000..120000 and >= minMs"); return; } cfg.cooldownMinMs = (uint32_t)minMs; cfg.cooldownTimeoutMs = timeoutMs; Serial.println("OK"); return; }
+  if (cmd.startsWith("set cooldownms ")) {
+    // NOTE: this command has a 3-word prefix, so the generic parseTwoInts() (which
+    // splits on the first two spaces) would misparse "cooldownms" as the first int.
+    // Parse the two values from after the prefix explicitly.
+    String a = cmd.substring(String("set cooldownms ").length()); a.trim();
+    int sp = a.indexOf(' ');
+    if (sp < 0) { Serial.println("ERROR: use set cooldownms <minMs> <timeoutMs>"); return; }
+    int minMs = a.substring(0, sp).toInt();
+    uint32_t timeoutMs = (uint32_t)a.substring(sp + 1).toInt();
+    if (minMs < 1000 || minMs > 30000 || timeoutMs < 5000 || timeoutMs > 120000 || timeoutMs < (uint32_t)minMs) { Serial.println("ERROR: minMs 1000..30000, timeoutMs 5000..120000 and >= minMs"); return; }
+    cfg.cooldownMinMs = (uint32_t)minMs; cfg.cooldownTimeoutMs = timeoutMs; Serial.println("OK"); return;
+  }
   if (cmd.startsWith("set accelms ")) { int v = numberAfter(cmd, "set accelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: accelms 50..2000"); return; } cfg.accelStepDelayMs = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set decelms ")) { int v = numberAfter(cmd, "set decelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: decelms 50..2000"); return; } cfg.decelStepDelayMs = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set lowaccelms ")) { int v = numberAfter(cmd, "set lowaccelms "); if (v < 100 || v > 3000) { Serial.println("ERROR: lowaccelms 100..3000"); return; } cfg.lowAccelStepDelayMs = v; Serial.println("OK"); return; }

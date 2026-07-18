@@ -391,6 +391,57 @@ auto-prototype Arduino (OK).
 
 ---
 
+# 🔎 Quét toàn project vòng 3 (2026-07-18d)
+
+Quét lại bằng 2 agent (correctness + hồi quy toàn firmware; TEST_STARTER + đối chiếu
+doc↔code). Xác nhận: **các fix vòng 1–2 đúng, không hồi quy**; **TEST_STARTER không bug**;
+`CODE_ARCHITECTURE.md` khớp code (chỉ 3 chỗ chữ nghĩa nhỏ đã vá). Fix 3 điểm mới:
+
+- **#1 `set cooldownms` hỏng**: `parseTwoInts` cắt theo dấu cách đầu tiên nhưng lệnh có
+  prefix 3 từ → `minMs` parse nhầm thành 0 → luôn báo lỗi. Sửa: parse riêng 2 số sau prefix.
+- **#2 `off`/SAFE-OFF lúc COOLDOWN-sau-abort** lọt sang WAITING (xóa lý do lỗi, bỏ qua
+  `clearabort`, cắt luôn airflow làm mát). Sửa: `stage2Off()` bỏ qua khi
+  `MODE_COOLDOWN && cooldownAfterAbort` → để cooldown chạy hết vào ABORTED.
+- **#3 RPM_SIGNAL_LOST abort oan động cơ đang chạy** (có sẵn): NOISY do `rejected≥3` tuyệt
+  đối trong 1 cửa sổ 100ms có thể tắt máy khoẻ. Sửa: **debounce** NOISY-nhưng-còn-xung ở
+  IDLING/OPERATING — chỉ abort nếu kéo dài ≥ `RPM_NOISY_ABORT_MS` (300ms); mất xung thật
+  (recency 400ms) vẫn abort ngay.
+
+**Verify**: compile sạch (`g++ -fsyntax-only -Wall -Wextra`) + mô phỏng auto-prototype Arduino.
+
+---
+
+# 🔎 Review GATE trước merge — vòng 4 (2026-07-18e)
+
+Quét thật kỹ bằng 4 agent (verify sâu 3 fix vòng 3; audit toàn bộ state machine/interlock;
+sensor/ISR/toán/concurrency; command/Web/SD). Xác nhận: 3 fix vòng 3 **đúng**; re-arm
+interlock **sạch, không còn rò**; toán học/ISR/atomicity/chia-0/LEDC/parse/SD **đúng**;
+TEST_STARTER **sạch**. Fix 8 điểm mới (gồm 1 hồi quy):
+
+- **A** (an toàn) Test Wizard `test ign/starter_ign/valve1/valve2` giờ chặn EGT nóng
+  (`fuelCommandBlockedByHotEgt`) như các lệnh trực tiếp; `test starter` vẫn cho (làm mát).
+- **B** (hồi quy do #7 vòng 2) Comm watchdog **bỏ phủ MODE_STARTING** → start-bằng-Serial
+  không còn bị COMM_TIMEOUT oan giữa chừng; fuel-unattended lúc start vẫn được stage timeout chặn.
+- **G** (an toàn) Lệnh reset RPM (`rpmreset`/`set rpmfilter`/`set rpmedge`, cả nút Web) không
+  còn gây `RPM_SIGNAL_LOST` oan khi đang chạy: thêm **grace** sau `resetRpmStats()`
+  (`rpmStatsResetAtMs`) trong checkFailures.
+- **D** SPINUP starter-prove (2 chỗ) dùng **recency** thay `rpmMeasurementUsable()` → EMI
+  igniter/starter không abort `NO_STARTER_RPM` oan (đồng bộ với checkFailures STARTING).
+- **H** `set idlerpm` không cho vượt `maxRpm-5000` (giữ invariant idle<max, tránh governor
+  nhắm trên OVERSPEED).
+- **I** `set ppr` giờ chỉ nhận ở WAITING/ABORTED (đổi mid-run rescale RPM → FLAMEOUT/OVERSPEED oan).
+- **E** `classifyRpmNoise`: xung mồi đầu tiên (raw==1, accepted==0) không còn bị coi NOISY (đổi `raw>0`→`raw>1`).
+- **F**/**J** vá sentinel `micros()==0` trong updateRpm; nới reserve JSON 2560→3072.
+
+**Chấp nhận (không sửa)**: `off` lúc soft-stop cooldown cắt airflow sớm (thao tác chủ ý,
+restart vẫn chặn EGT); phơi nhiễm overspeed ≤300ms khi NOISY (đánh đổi có chủ đích);
+`checkPostIgnitionRpmRise` dùng usable (cửa sổ 10s che, rủi ro thấp); millis rollover ~49.7 ngày.
+
+**Verify**: compile sạch (`g++ -fsyntax-only -Wall -Wextra`, không warning) + mô phỏng
+auto-prototype Arduino (OK).
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-18c (xử lý các mục LOW còn lại)
+**Lần cập nhật**: 2026-07-18e (review GATE vòng 4 trước merge: 8 fix gồm hồi quy watchdog)

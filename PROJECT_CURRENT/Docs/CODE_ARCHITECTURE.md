@@ -1,644 +1,363 @@
-# ECU TestV1 Firmware - Code Architecture & Understanding Guide
+# ECU TestV1 Firmware — Code Architecture & Understanding Guide
 
-**Firmware**: `ECU_TestV1_EGT_DRY_START_PATCH.ino`  
-**Size**: 1,919 lines  
-**Platform**: ESP32 (NodeMCU-32S)  
+**Firmware**: `ECU_TestV1_EGT_DRY_START_PATCH.ino`
+**Size**: ~2,400 lines
+**Platform**: ESP32 (NodeMCU-32S), Arduino core 2.x **or** 3.x
 **Language**: Arduino C++
+
+> **Note on line numbers**: this guide navigates by **function / symbol name**, not
+> line numbers — the firmware evolves and hard line references drift. Use your
+> editor's symbol search. A companion changelog of behaviour changes lives in
+> `CODE_REVIEW_FINDINGS.md`.
 
 ---
 
 ## 🏗️ Overall Architecture
 
-The firmware is organized around a **State Machine** model with the following key concepts:
+State-machine firmware. One non-blocking `loop()` drives everything:
 
 ```
-┌─────────────────────────────────────────────┐
-│         Main Loop (240 Hz)                  │
-├─────────────────────────────────────────────┤
-│ 1. Read EGT & RPM sensors                   │
-│ 2. Update state machine                     │
-│ 3. Calculate fuel target                    │
-│ 4. Update outputs (ESC, ignition, valves)   │
-│ 5. Handle button inputs                     │
-│ 6. Update Web UI                            │
-│ 7. Log to SD card                           │
-│ 8. Update status LED                        │
-└─────────────────────────────────────────────┘
+loop():
+  1. server.handleClient()          (Web UI, if started)
+  2. drain Serial -> handleCommand()
+  3. handleUserButton()
+  4. manual auto-off timers          (ign / starter / pump / valve1 / valve2)
+  5. updateActiveTest()              (Test Wizard countdowns)
+  6. isStage2Armed()                 (auto-disarm after 10s)
+  7. updateRpm(); updateEgt()        (sensors)
+  8. mode switch:  updateStarting / updateIdling / updateOperating / updateCooldown
+  9. checkFailures()                 (all aborts evaluated here)
+  10. applyOutputs()                 (write ESC PWM + digital outputs)
+  11. updateStatusLed()
+  12. updateSdTelemetry(); flushSdEventQueue()   (deferred SD writes)
+  13. printStatus(false)             (throttled serial status)
 ```
+
+Fuel/RPM/EGT control is re-evaluated every loop; safety checks (`checkFailures`)
+run **after** the mode update and **before** `applyOutputs()`.
+
+---
+
+## ⚙️ PWM Driver — raw LEDC (not ESP32Servo)
+
+ESC outputs (pump + starter) are driven by the ESP32 **LEDC** peripheral directly,
+**not** the `ESP32Servo` library (which produced an unstable pulse on some core
+versions and stuttered the ESC — see `CLAUDE.md`).
+
+```cpp
+escAttach(pin, legacyChannel)   // ledcAttach() on core >=3, ledcSetup+ledcAttachPin on core <3
+escWriteUs(pin, legacyChannel, us)  // duty = us * 65535 / 20000  (50 Hz, 16-bit)
+```
+- 50 Hz frame, 16-bit resolution → 1000 µs = duty 3276, 2000 µs = duty 6553.
+- Core version detected via `ESP_ARDUINO_VERSION_MAJOR`.
+
+> **Arduino gotcha**: because `escAttach`/`escWriteUs` are the first functions in the
+> sketch, the IDE injects auto-generated prototypes ahead of the enum definitions.
+> The state enums (`EcuMode`, `StartStage`, `RpmNoiseLevel`, `TestId`, `TestResult`)
+> are therefore **forward-declared** near the top so those prototypes compile.
 
 ---
 
 ## 🎯 Core State Machine
 
-### **ECU Modes** (Lines 169)
+### ECU Modes
 ```cpp
-enum EcuMode {
-  MODE_WAITING,    // Idle, waiting for user command
-  MODE_STARTING,   // Starting sequence in progress
-  MODE_IDLING,     // Idle stable, waiting for throttle
-  MODE_OPERATING,  // Active operation
-  MODE_COOLDOWN,   // Post-stop cooling with starter running
-  MODE_ABORTED     // Error state
-}
+enum EcuMode : uint8_t {
+  MODE_WAITING, MODE_STARTING, MODE_IDLING,
+  MODE_OPERATING, MODE_COOLDOWN, MODE_ABORTED
+};
 ```
 
-### **Start Stages** (Lines 170)
+### Start Stages
 ```cpp
-enum StartStage {
-  ST_NONE,                 // Not starting
-  ST_PURGE,                // Purge engine (starter only)
-  ST_SPINUP_PREHEAT,       // Spin up + preheat
-  ST_INTRO_FUEL,           // First fuel injection
-  ST_POST_IGNITION_HEAT,   // Post-ignition heating
-  ST_ACCEL_TO_IDLE         // Accelerate to idle RPM
-}
+enum StartStage : uint8_t {
+  ST_NONE, ST_PURGE, ST_SPINUP_PREHEAT,
+  ST_INTRO_FUEL, ST_POST_IGNITION_HEAT, ST_ACCEL_TO_IDLE
+};
 ```
 
-### **Mode Transitions**
+### Mode transitions
 ```
 WAITING
-  ↓ (user presses button 3s)
-STARTING (ST_PURGE → ST_SPINUP → ST_INTRO_FUEL → ST_POST_IGN_HEAT → ST_ACCEL_TO_IDLE)
-  ↓ (idle RPM reached)
-IDLING
-  ↓ (throttle applied)
-OPERATING
-  ↓ (soft stop / error)
-COOLDOWN (starter runs, fuel OFF) / ABORTED
-  ↓ (cooldown complete or manual clear)
-WAITING
+  │ arm (button hold 2s / arm2) then start (button hold 3s / startidle)
+  ▼
+STARTING  (ST_PURGE → ST_SPINUP_PREHEAT → ST_INTRO_FUEL → ST_POST_IGNITION_HEAT → ST_ACCEL_TO_IDLE)
+  │ idle RPM reached  (enterMode records runningSinceMs here)
+  ▼
+IDLING ⇄ OPERATING   (throttle >0 / =0 toggles; does NOT reset runningSinceMs)
+  │ soft stop / any abort
+  ▼
+COOLDOWN (starter airflow, fuel/ign/valves OFF)
+  │ min time + (EGT cool OR timeout)
+  ▼
+WAITING            (after soft stop)   or   ABORTED (after an abort)
 ```
+
+`ABORTED` is left only by `clearabort` (sets `abortAcknowledged`) or the physical
+button hold. `stop`/`off` do **not** clear ABORTED (interlock).
 
 ---
 
-## 📊 Data Structures
+## 📊 Key Data Structures
 
-### **1. Configuration Structure** (Lines 102-167)
-```cpp
-struct Config {
-  // Safety & Start Requirements
-  bool autoStartEnabled;              // Auto-start on power-up
-  bool requireEgtForStart;            // Require EGT valid for start
-  bool allowDryStartWhenEgtFault;     // Allow dry-start if EGT sensor open
-  bool requireRpmForStart;            // Require RPM increase for fuel
-  
-  // Temperature Control
-  int ignitionThresholdC;             // Min temp for ignition
-  int maxEgtC;                        // Max safe EGT
-  int startTargetEgtC;                // Target during start
-  int maxTempGradientCps;             // Max temp rise rate
-  
-  // RPM Control
-  int maxRpm;                         // Max safe RPM
-  int idleRpm;                        // Target idle RPM
-  int rpmTolerance;                   // RPM deadband
-  
-  // Timing Parameters
-  uint32_t purgeTimeMs;               // Purge duration
-  uint32_t preheatMs;                 // Preheat duration
-  uint32_t accelToIdleTimeoutMs;      // Max time to reach idle
-  
-  // Cooldown Parameters
-  uint32_t cooldownMinMs;             // Min cooldown time
-  int cooldownTargetC;                // Target cooldown temp
-  
-  // Fuel Control
-  int introFuelUs;    // ~50 ml/min
-  int idleFuelUs;     // ~80 ml/min
-  int maxFuelUs;      // ~280 ml/min
-};
-```
+### Config (`struct Config cfg`)
+Runtime configuration; the struct values are **power-on defaults**, most are
+overridable at runtime via `set ...` (Serial/Web). Notable fields:
 
-### **2. EGT State** (Lines 217-222)
-```cpp
-struct EgtState {
-  bool ok;                    // Valid reading
-  float c;                    // Current temperature (°C)
-  float prevC;                // Previous temperature
-  float gradientCps;          // Rate of change (°C/sec)
-  uint8_t fault;              // Fault code from MAX31855
-  uint32_t lastReadMs;        // Last read time
-  uint32_t lastGoodMs;        // Last valid reading time
-};
-```
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `autoStartEnabled` | false | Auto-idle at boot (off) |
+| `requireEgtForStart` / `allowDryStartWhenEgtFault` | true | EGT gating / dry-start fallback |
+| `requireRpmForStart`, `abortOnEgtFault`, `abortOnRpmFault` | true | Abort enables |
+| `ignitionThresholdC` | 100 | "combusting" / ignition threshold |
+| `maxEgtC` | 680 | OVER_TEMP abort limit |
+| `maxTempGradientCps` | 200 | EGT rise-rate limit (steady state only) — `set maxgrad` |
+| `idleRpm` / `maxRpm` / `rpmTolerance` | 42000 / 110000 / 5000 | RPM targets & deadband |
+| `flameoutRpm` / `starterReleaseRpm` | 15000 / 24000 | flame-out / starter release |
+| `starterPurgeUs` / `starterSpinUs` / `starterAssistUs` | 1100 / 1200 / 1200 | crank PWM — `set purgeus/spinus/assistus` |
+| `introFuelUs` | 1160 (~50 ml/min) | light-off fuel dose (kept **< idle**) — `set intro` |
+| `idleFuelUs` / `maxFuelUs` | 1175 / 1260 | idle / max fuel — `set idleus/maxus` |
+| `pumpTestUs` | 1210 | bench pump-prime PWM, **separate** from introFuelUs — `set pumptestus` |
+| `commWatchdogEnabled` / `commTimeoutMs` | true / 8000 | operator-link watchdog |
+| cooldown / accel-to-idle / ramp timings | — | various `set ...` |
 
-### **3. RPM State** (Lines 237-261)
-```cpp
-struct RpmState {
-  float rpm;                  // Current RPM value
-  float avgIntervalUs;        // Average pulse interval (microseconds)
-  float jitterPct;            // Pulse timing variation (%)
-  float rejectPct;            // Rejected pulses (%)
-  RpmNoiseLevel noise;        // Signal quality classification
-  bool signalRecent;          // Signal received recently
-  bool restGuardActive;       // REST mode noise guard enabled
-  // ... (debug/diagnostic fields)
-};
-```
+> All PWM/limit tuning setters are **rejected unless WAITING/ABORTED** so a stray
+> command can't move a live setpoint or the protection envelope mid-run.
+
+### EgtState `egt`
+`ok, c, prevC, gradientCps, fault, lastReadMs, lastGoodMs`.
+
+### RpmData `rpmData`
+`rpm` (chosen source), `rpmPeriod` (instantaneous), `rpmWindow` (100 ms average),
+`avgIntervalUs`, `jitterPct` (CV = stddev/mean), `rejectPct`, `rpmDiffPct`,
+`rawEdges/acceptedWindow/rejectedEdges`, `noise` (RpmNoiseLevel), `signalRecent`,
+`restPulseNoise`.
 
 ---
 
-## 🔌 Pin Configuration (Lines 44-58)
+## 🔌 Pin Configuration
 
-| Pin | Function | Direction | Type |
-|-----|----------|-----------|------|
-| GPIO 18 | EGT CLK | OUT | SPI |
-| GPIO 5 | EGT CS | OUT | SPI |
-| GPIO 19 | EGT DO | IN | SPI |
-| GPIO 33 | RPM Sensor | IN | Digital (ISR) |
-| GPIO 26 | Pump ESC | OUT | PWM (1000-2000 µs) |
-| GPIO 25 | Starter ESC | OUT | PWM (1000-2000 µs) |
-| GPIO 17 | Valve 1 | OUT | Digital |
-| GPIO 16 | Valve 2 | OUT | Digital |
-| GPIO 32 | Ignition/Glow | OUT | Digital |
-| GPIO 22 | User Button | IN | Digital (active-low) |
-| GPIO 2 | Status LED | OUT | Digital (active-low) |
-| **SPI (SD Card)** | | | |
-| GPIO 13 | SD CS | OUT | SPI |
-| GPIO 14 | SD SCK | OUT | SPI |
-| GPIO 23 | SD MOSI | OUT | SPI |
-| GPIO 27 | SD MISO | IN | SPI |
+| Pin | Function | Dir | Type |
+|-----|----------|-----|------|
+| 18 / 5 / 19 | EGT CLK / CS / DO | — | SPI (MAX31855) |
+| 33 | RPM sensor | IN | Digital (ISR) |
+| 26 | Pump ESC | OUT | LEDC PWM 50 Hz |
+| 25 | Starter ESC | OUT | LEDC PWM 50 Hz |
+| 17 | Valve 1 (Start solenoid) | OUT | Digital |
+| 16 | Valve 2 (Main oil) | OUT | Digital |
+| 32 | Ignition / glow | OUT | Digital |
+| 22 | User button | IN | Digital (active-low) |
+| 2 | Status LED | OUT | Digital (active-low) |
+| 13 / 14 / 23 / 27 | SD CS / SCK / MOSI / MISO | — | SPI |
+
+Valve roles (per EnJet E86/G3 manual): **Valve1** = start solenoid, open only
+during `MODE_STARTING`; **Valve2** = main oil valve, open whenever fuel is commanded.
 
 ---
 
-## 🔋 Key Components & Systems
+## 🔋 Subsystems
 
-### **1. EGT (Exhaust Gas Temperature) System**
-**File Location**: Lines 217-222, 394-401
+### 1. EGT (MAX31855)
+- `updateEgt()` polls every `EGT_READ_PERIOD_MS` (120 ms); `readError()` then
+  `readCelsius()`; `isnan`/fault → `egt.ok=false`, gradient zeroed.
+- `gradientCps` = ΔT/Δt.
+- **Two look-aheads with different jobs**:
+  - Fuel control: 3 s projected temp (`egt.c + 3·gradient ≥ maxEgtC`) — steady state.
+  - OVER_TEMP abort: short `EGT_ABORT_LOOKAHEAD_S = 0.2 s` — compensates ~1 sample of
+    read staleness so a fast rise can't overshoot `maxEgtC` by a sample.
+- **Stuck-sensor hint** (log only, never aborts): if `egt.c` is byte-for-byte
+  unchanged for `EGT_STUCK_WARN_MS` (6 s) while combusting, logs a warning — a
+  frozen-but-valid thermocouple isn't caught by open/short fault detection.
+- **Dry-start**: if EGT is OPEN, `startidle` becomes a starter/RPM-only test
+  (pump/valves/ign forced OFF every loop); real fuel start still needs valid EGT.
 
-**Components**:
-- `Adafruit_MAX31855` thermocouple reader
-- K-type thermocouple
-- SPI communication
+### 2. RPM sensing (ISR on GPIO 33)
+- `rpmISR()` timestamps each edge with `micros()` (coerced to non-zero to avoid the
+  "no edge yet" sentinel colliding at the ~71 min wrap).
+- **Two-stage de-glitch**: (a) fixed min quiet-period `rpmMinPulseUs` (120 µs default,
+  `set rpmfilter`); (b) adaptive half-period mask — reject an edge closer than half
+  the last accepted period (an isolated EMI spike after a quiet gap).
+- `updateRpm()` snapshots ISR counters inside `noInterrupts()` (the only `uint64_t`
+  accumulators are read atomically there), computes:
+  - `rpmWindow = accepted · 60e6 / (windowUs · ppr)`  (100 ms average)
+  - `rpmPeriod = 60e6 / (lastPeriod · ppr)`  (instantaneous, preferred when recent)
+  - `jitterPct` = **coefficient of variation** (stddev/mean), so one stray interval
+    doesn't swamp an otherwise-clean signal.
+- **REST guard**: while WAITING with all outputs safe, isolated edges are treated as
+  noise (`RPM_REST_NOISE`, control RPM forced 0) to stop 1–3 false pulses reading as RPM.
 
-**Key Functions**:
-```cpp
-egtFaultString(uint8_t f)          // Decode MAX31855 fault codes
+Noise classes (`classifyRpmNoise`):
+```
+NO_SIGNAL : no recent signal and raw==0
+NOISY     : raw>0 & accepted==0, OR rejected>=3/rejectPct>20, OR jitter>30% (>=5 intervals), OR rpmDiff>30%
+WARN      : rejected>0/rejectPct>5,  OR jitter>15% (>=3 intervals),           OR rpmDiff>15%
+CLEAN     : otherwise
+REST_NOISE: rest-guard active
 ```
 
-**Reading Cycle**:
-- Polling period: 120ms (EGT_READ_PERIOD_MS)
-- Fault detection: SPI/wiring, open circuit, shorts
-- Gradient monitoring: Detect sharp temperature rises
-- Lookahead: 3-second prediction to prevent overshoot
+### 3. Fuel control (hybrid, closed-loop to RPM)
+```
+target RPM ──► fuelTargetUs (nudged ±fuelStepUs vs RPM error, gated by EGT)
+                    │
+             pumpUs ── ramps toward target 1 µs / step (accel/decel delays)
+```
+- Pump map (`kPumpMap`, µs → ml/min), interpolated by `flowFromUs`/`usFromFlow`:
+  `1000→0, 1160→50, 1175→80, 1250→265, 1260→280, 1265→360, 1270→560, 1300→600`.
+- **Over-temp emergency cut**: when `egtRequestsFuelCut()` fires, `pumpUs` steps down
+  by `fuelCutStepUs` at the fast decel rate (~40 µs/s), not the old ~2 µs/s ramp that
+  could never keep up before the hard abort.
+- **Governed ceiling**: `updateOperating()` targets `maxRpm − rpmTolerance` at 100%
+  throttle, so full throttle doesn't drive the engine into its own OVERSPEED abort.
+- During `MODE_STARTING` the gradient / 3 s look-ahead fuel limiting is **skipped**
+  (a fast EGT rise at light-off is expected); only absolute `maxEgtC` + the abort
+  look-ahead protect there, so the start can actually reach idle.
 
-**Safety Features**:
-- Dry-start mode if EGT is OPEN (sensor fault)
-- Temperature gradient limits (200°C/sec default)
-- Maximum EGT limit (680°C default)
-
-### **2. RPM Sensing System**
-**File Location**: Lines 224-261, 375-391
-
-**Components**:
-- ISR (Interrupt Service Routine) on GPIO 33
-- Hardware interrupt for precise pulse timing
-- Real-time noise filtering
-
-**RPM Calculation**:
-```cpp
-1. Measure pulse interval (microseconds)
-2. Calculate RPM: RPM = (60,000,000 µs/min) / (pulse_interval µs)
-3. Apply noise filter (120 µs minimum pulse width)
-4. Classify signal quality (CLEAN, WARN, NOISY, REST_NOISE)
+### 4. User button (GPIO 22, active-low, 35 ms debounce)
+```
+WAITING : short=status · hold 2s=ARM
+ARMED   : hold 3s=START IDLE           (button runs set runStartedByButton)
+STARTING/IDLING/OPERATING : any press=SOFT STOP
+ABORTED : hold 2s=clear (if EGT safe/deliberate)
 ```
 
-**Noise Classification**:
-```cpp
-RPM_CLEAN       → <5% rejected, <15% jitter → Safe to use
-RPM_WARN        → 5-20% rejected, 15-30% jitter → Caution
-RPM_NOISY       → >20% rejected, >30% jitter → Block start
-RPM_REST_NOISE  → Isolated pulses at rest → Block start
-RPM_NO_SIGNAL   → No pulses received → Cannot start
-```
-
-**REST Guard Feature**:
-When ECU is WAITING and all outputs OFF, any isolated pulses are rejected. This prevents 1-3 false pulses from being misinterpreted as engine RPM.
-
-### **3. Fuel Control System**
-**File Location**: Lines 403-421, 152-163
-
-**Hybrid Fuel Control Model**:
-```
-Target RPM
-    ↓
-Fuel Target (fuelTargetUs) ← Compare RPM to idle target
-    ↓
-Actual Pump Output (pumpUs) ← Ramp slowly (1 µs per step)
-```
-
-**Pump Calibration Table** (Lines 96-100):
-```cpp
-// Interpolates between these points
-1000 µs  → 0.0 ml/min   (idle safe)
-1160 µs  → 50.0 ml/min  (intro fuel)
-1175 µs  → 80.0 ml/min  (idle)
-1250 µs  → 265.0 ml/min
-1260 µs  → 280.0 ml/min (max)
-```
-
-**Key Functions**:
-```cpp
-flowFromUs(int us)      // Convert microseconds to flow rate
-usFromFlow(float ml)    // Convert flow rate to microseconds
-```
-
-**Control Logic**:
-- Target fuel is adjusted based on RPM error
-- Actual pump output ramps toward target at 1 µs/step
-- Low-RPM ramps are slower (smoother control)
-- Cut step is faster for emergencies (5 µs vs 1 µs)
-
-### **4. Button/User Input System**
-**File Location**: Lines 329-334
-
-**Button Logic**:
-```
-WAITING Mode:
-  Short press → Print status
-  Hold 2s     → ARM (stage2Armed = true for 10s)
-  
-ARMED State:
-  Hold 3s     → START sequence
-
-STARTING/IDLING/OPERATING:
-  Any press   → SOFT STOP (graceful shutdown)
-
-ABORTED State:
-  Hold 2s     → Clear error (if EGT safe)
-```
-
-**Debounce**: 35ms (BTN_DEBOUNCE_MS)
-
-### **5. Output Control** (Lines 423-434)
-
-**applyOutputs()**:
-- Constrains ESC values to 1000-2000 µs
-- Writes PWM to pump & starter ESCs
-- Sets digital outputs (ignition, valves)
-
-**Safety**:
-- All outputs initialized to safe state (1000 µs for ESC, OFF for digital)
-- `forceSafeOutputs()` cuts all power immediately
+### 5. Output control
+`applyOutputs()` constrains ESC values to 1000–2000 µs and writes PWM + digital
+outputs. `forceSafeOutputs()` slams everything safe (ESC 1000 µs, ign/valves OFF,
+clears the valve auto-off timers; the ign/starter/pump timers are cleared in
+`stage2Off()`/`beginAutoIdle()`). Manual bench outputs (ignpulse/starttest/
+pumptest/valve-on) all have loop auto-off timers.
 
 ---
 
-## 🚀 Start Sequence Details
-
-### **Complete Start Flow** (Lines ~800+)
+## 🚀 Start Sequence
 
 ```
-1. PURGE (3s default)
-   └─ Starter runs at purgeUs (1100 µs)
-   └─ No fuel, no ignition
-
-2. SPINUP_PREHEAT
-   └─ Increase starter to spinUs (1150 µs)
-   └─ Wait for preheatMs (2.5s)
-   └─ Monitor RPM rise
-
-3. INTRO_FUEL
-   └─ Ignite glow plug
-   └─ Introduce fuel at introFuelUs (~50 ml/min)
-   └─ Wait for flame confirmation (RPM > fuelConfirmRpm)
-
-4. POST_IGNITION_HEAT
-   └─ Maintain fuel flow
-   └─ Monitor temperature rise
-   └─ Increase starter to assistUs (1200 µs)
-
-5. ACCEL_TO_IDLE
-   └─ Gradually increase fuel
-   └─ Target idleRpm (42,000 RPM default)
-   └─ Starter releases at starterReleaseRpm
-   └─ Timeout after accelToIdleTimeoutMs (20s)
-   └─ Move to IDLING when idle RPM stable
+ST_PURGE (purgeTimeMs 3s)         starter=starterPurgeUs(1100), no fuel/ign
+ST_SPINUP_PREHEAT (preheatMs)     starter=starterSpinUs(1200), igniter ON (preheat); needs cranking RPM (starterProveMinRpm)
+ST_INTRO_FUEL                     igniter still ON, valves open, fuel=introFuelUs(1160); wait ignition/fuel-confirm
+ST_POST_IGNITION_HEAT             hold fuel, watch RPM rise; starter -> starterAssistUs(1200)
+ST_ACCEL_TO_IDLE                  closed-loop fuel to idleRpm; starter releases; timeout=accelToIdleTimeoutMs(20s)
+  └─ idle stable ► MODE_IDLING
 ```
-
-### **Dry-Start Mode** (EGT Sensor Open)
-When thermocouple is disconnected:
-```
-1. Detect EGT fault (OPEN)
-2. Check allowDryStartWhenEgtFault flag
-3. Convert to DRY START:
-   └─ Starter runs normally
-   └─ PUMP stays OFF
-   └─ VALVES stay OFF
-   └─ IGNITION stays OFF
-   └─ Only tests starter & RPM sensor
-4. Cannot transition to fuel-on stage
-   └─ Real fuel start still requires valid EGT
-```
+Every stage is time-bounded (no infinite hang). Dry-start runs the same stages with
+fuel/valves/ign forced OFF and its own RPM-test timeouts.
 
 ---
 
-## 🌐 Web UI System
+## 🔒 Safety — `checkFailures()` (runs every loop, not in WAITING/COOLDOWN/ABORTED)
 
-**File Location**: Lines 265-273, 200-201
+Order and conditions:
+1. **COMM_TIMEOUT** — only while RUNNING (IDLING/OPERATING) with no operator link
+   within `commTimeoutMs`. **Exempt** for button-started runs (`runStartedByButton`);
+   re-engages on any remote command. MODE_STARTING is deliberately NOT covered (the
+   automated start outlasts `commTimeoutMs` with nothing to refresh the link, so
+   covering it would false-abort a Serial-only start); the start is bounded instead
+   by the per-stage timeouts.
+2. **EGT_FAULT** — sensor invalid (unless dry-start).
+3. **OVER_TEMP** — `egt.c ≥ maxEgtC` OR the 0.2 s look-ahead projects past it.
+4. **OVERSPEED** — usable RPM `≥ maxRpm`.
+5. **RPM_SIGNAL_LOST** — while fueled: in STARTING, pulse-recency only (so ignition
+   EMI classifying NOISY doesn't false-abort a light-off); in IDLING/OPERATING, no
+   pulse within `FUELED_RPM_LOSS_TIMEOUT_MS` (400 ms → fast flameout cut), OR a
+   NOISY-but-present signal sustained ≥ `RPM_NOISY_ABORT_MS` (300 ms debounce, so a
+   one-window EMI blip can't shut down a healthy engine). Suppressed for one
+   loss-timeout after any `resetRpmStats()` so a stats reset can't read as loss.
+   The same recency-not-NOISY logic is used by the SPINUP starter-prove checks.
+6. **FLAMEOUT** — RPM `< flameoutRpm` after a 1.5 s grace **anchored to
+   `runningSinceMs`** (first stable idle), so throttle toggles can't re-arm/mask it.
 
-**Configuration**:
-- SSID: `ECU_TestV1`
-- Password: `admin1234`
-- IP: `192.168.4.1`
-- Port: 80
+Other interlocks:
+- `requestStop()` acts only in STARTING/IDLING/OPERATING (no ABORTED backdoor).
+- `stage2Off()`/`off` in ABORTED only re-asserts safe outputs; requires `clearabort`.
+- `ignpulse` and `valve1/valve2 on` are blocked while EGT is hot
+  (`fuelCommandBlockedByHotEgt`); `starttest` (starter only) stays allowed.
+- All outputs OFF on boot; ESC held at 1000 µs during arm.
 
-**Features**:
-- Dashboard with real-time status
-- Control buttons (ARM, START, STOP)
-- Parameter adjustment
-- Test Wizard (runs checklist tests)
-- Event log viewer
-- Configuration save/restore
+---
 
-**Key Functions**:
-```cpp
-setupWebServer()         // Define all routes
-startWebServer()         // Start SoftAP & listen
-stopWebServer()          // Shutdown
-htmlPage()               // Generate HTML dashboard
-webStatusJson()          // JSON status data
-```
+## 🌐 Web UI (SoftAP)
+
+- SSID `ECU_TestV1`, password `admin1234` (**weak default — change `WEB_PASS`
+  before live use**; anyone on the AP can arm/start via `/cmd`), IP `192.168.4.1`.
+- Routes: `/` (dashboard), `/api` (JSON status, `?act=0` when tab hidden so a
+  walked-away session times out instead of keeping the watchdog alive), `/cmd?c=...`
+  (runs `handleCommand`, same interlocks as Serial).
+- Dashboard: status cards, controls, **Test Wizard**, **Tune quick set** and
+  **Starter & Fuel PWM** panels whose inputs **auto-populate from live config**
+  (so clicking Set can't silently change a limit), **Starter Manual Test**, event log.
+- `webStatusJson()` builds the payload by hand (no ArduinoJson); `jsonEscape()`
+  escapes `"` `\` and all control chars.
 
 ---
 
 ## 💾 SD Card Logging
 
-**File Location**: Lines 275-280, 204-207
+- `sdLogEvent()` snapshots a CSV line and queues it (ring buffer, drop-oldest); the
+  **blocking** `SD.open/println/close` happens in `flushSdEventQueue()` and
+  `updateSdTelemetry()` late in the loop, after safety checks.
+- **Backoff**: after 5 consecutive write failures `sdOk` is cleared so a pulled card
+  stops blocking the control loop every cycle (re-enable requires reboot).
+- Telemetry ~2 lines/s while active; CSV columns include time, mode, stage, EGT,
+  gradient, RPM, fuel target, pump/start µs, ign, valves, throttle, abort reason.
 
-**CSV Logging Format**:
+---
+
+## ✅ Test Wizard / Checklist
+
+Nine tests (`test egt|rpm_noise|ign|starter|starter_ign|valve1|valve2|pump|kill`),
+results `TEST_NOT_RUN/RUNNING/PASS/FAIL`. Optionally required before `startidle`
+(`set checklist on/off`). Timed tests auto-off; `beginAutoIdle()` cancels any active
+test so a countdown can't fire mid-start.
+
+---
+
+## 🎮 Serial / Web Commands (selected)
+
 ```
-Time_ms, Mode, RPM, EGT_C, Pump_us, Start_us, Ign, V1, V2
-1000,    PURGE, 0,  25,   1100,    1100,    0,  0,  0
-1500,    PURGE, 150, 26,  1100,    1100,    0,  0,  0
-...
-```
-
-**Log Rate**: 2 lines/sec (500ms) during active operation
-
-**File Naming**: `/ECU000.CSV`, `/ECU001.CSV`, etc. (auto-increment)
-
-**Functions**:
-```cpp
-initSdLogging()          // Mount SD, create log file
-updateSdTelemetry()      // Write data periodically
-sdLogEvent(msg)          // Log text event
+help | status | showcfg | rpmreset | stop | off
+arm2 | autostart on/off | startidle | clearabort [force]
+rpmdetail [on|off]
+ignpulse <ms> | starttest <us> <ms> | pumptest <us> [ms]      (arm2, WAITING/ABORTED; EGT-hot blocked where fuel/ign)
+valve1 on/off | valve2 on/off                                 (auto-off 10s; EGT-hot blocked)
+test <name> | checklist | resetcheck | confirmkill | set checklist on/off
+set intro/idleus/maxus/pumptestus <us>                        (WAITING/ABORTED only)
+set purgeus/spinus/assistus <us>   (1000..1500)               (WAITING/ABORTED only)
+set idlerpm/maxrpm/rpmtol <rpm> | set maxegt <C> | set maxgrad <C/s>   (WAITING/ABORTED only)
+set acceltoidlems/cooldownms/cooltarget/coolstarter ...
+set accelms/decelms/lowaccelms/lowdecelms | set throttle <0..100>
+set commtimeout <ms> | set commwatchdog on/off
+set rpmfilter <us> | set rpmedge rising|falling | set ppr 1|2
+set egtstart dry|strict | set drystartms <ms>
 ```
 
 ---
 
-## ✅ Test Wizard/Checklist System
-
-**File Location**: Lines 287-326
-
-**9 Tests**:
-1. **EGT** - Verify sensor reads temperature
-2. **RPM_NOISE** - Check signal quality
-3. **IGN_PULSE** - Ignition output works
-4. **STARTER** - Starter spins
-5. **STARTER_IGN_EMI** - No EMI interference
-6. **VALVE_1** - Gas valve 1 operates
-7. **VALVE_2** - Gas valve 2 operates
-8. **PUMP_PRIME** - Fuel pump primes
-9. **KILL_SWITCH** - Emergency stop works
-
-**Results**:
-```cpp
-enum TestResult {
-  TEST_NOT_RUN,    // Never run
-  TEST_RUNNING,    // Currently executing
-  TEST_PASS,       // Successful
-  TEST_FAIL        // Failed
-};
-```
-
-**Integration**:
-- Must pass checklist before normal start (configurable)
-- Can be run from Web UI
-- Results stored in event log
-- Helps diagnose hardware issues
-
----
-
-## 🔌 Status LED Patterns
-
-**GPIO 2** (active-low):
+## 🔌 Status LED (GPIO 2, active-low)
 
 | Pattern | Meaning |
 |---------|---------|
-| Very fast blink | Component test running |
-| Fast blink | Abort/error detected |
-| Quick blink (2 Hz) | Armed, waiting for start |
-| Solid ON | Starting/operating |
-| Medium blink | Idle stable |
-| Faster blink | Cooldown in progress |
-| Slow heartbeat | Waiting for input |
-
----
-
-## 🎮 Serial Commands
-
-Type commands in Serial Monitor:
-
-```cpp
-rpmdetail              // Toggle detailed RPM output
-rpmdetail on|off       // Enable/disable
-set rpmfilter <us>     // Change pulse width filter (e.g., 150)
-set rpmedge rising|falling  // Select edge trigger
-rpmreset               // Reset RPM ISR counters
-?                      // Print checklist
-test <name>            // Run specific test
-set <param> <value>    // Change config parameter
-```
-
----
-
-## 📈 Real-Time Calculations
-
-### **EGT Gradient** (Temperature rise rate)
-```cpp
-gradientCps = (current_temp - prev_temp) / time_elapsed_seconds
-```
-- Monitored every 120ms
-- Lookahead 3 seconds: if gradient continues, will temp exceed max?
-- Fuel is cut if overshoot predicted
-
-### **RPM Jitter** (Pulse timing variation)
-```cpp
-jitterPct = (maxInterval - minInterval) / avgInterval * 100%
-```
-- Clean: <15%
-- Warn: 15-30%
-- Noisy: >30%
-
-### **RPM Error** (Difference from target)
-```cpp
-error = targetRpm - currentRpm
-fuel_adjustment = error * K_proportional
-```
-
----
-
-## 🔒 Safety Features
-
-### **1. Multi-Level Abort**
-- EGT fault → Abort if `abortOnEgtFault`
-- RPM fault → Abort if `abortOnRpmFault`
-- Temperature limit → Abort if temp > maxEgtC
-- RPM limit → Cut fuel if RPM > maxRpm
-- Timeout → Abort if stage takes too long
-
-### **2. Gradient Monitoring**
-- Real-time temperature rise rate checked
-- Lookahead 3 seconds
-- Cuts fuel if overshoot predicted
-
-### **3. RPM Confidence**
-- Pulse noise classified in real-time
-- Noisy signals block start
-- Rest guard prevents false starts
-
-### **4. Safe Defaults**
-- All outputs OFF on boot
-- ESC at safe (1000 µs) position
-- No auto-start unless explicitly enabled
-
-### **5. Cooldown Mode**
-- Post-stop cooldown with starter running
-- Fuel/valves/ignition stay OFF
-- Allows engine to cool naturally
-- Configurable duration (5-45 seconds)
-
----
-
-## 📊 Performance Metrics
-
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Main Loop Rate | ~240 Hz | Based on status print interval |
-| EGT Sample Rate | ~8 Hz | 120ms polling |
-| RPM Sample Rate | 10 Hz | 100ms window |
-| SD Log Rate | 2 Hz | 500ms interval |
-| Button Debounce | 35 ms | Stable press detection |
-| Web Update Rate | ~1-2 Hz | Browser refresh rate |
-
----
-
-## 🔄 Function Call Hierarchy
-
-### **Main Control Loop**
-```cpp
-loop()
-├─ Read EGT (every 120ms)
-├─ Sample RPM (every 100ms)
-├─ updateButtonState()
-├─ updateFuel() [mode-specific]
-├─ updateStarting() [if MODE_STARTING]
-├─ updateIdling()
-├─ updateOperating()
-├─ updateCooldown()
-├─ applyOutputs()
-├─ updateStatusLed()
-├─ printStatus() [every 250ms]
-├─ handleSerial()
-├─ server.handleClient() [if web enabled]
-└─ updateSdTelemetry() [every 500ms]
-```
-
----
-
-## 🎓 Learning Path
-
-**Suggested order to understand the code**:
-
-1. **Start here**: Enums & structs (lines 169-261)
-   - Understand modes, stages, data structures
-
-2. **Pin layout**: Globals & initialization (lines 211-280)
-   - See what's connected where
-
-3. **Fuel control**: Pump calibration (lines 403-421)
-   - How fuel flow maps to microseconds
-
-4. **RPM**: Noise classification (lines 375-386)
-   - Signal quality detection
-
-5. **Main loop**: The `loop()` function (~line 1800+)
-   - How everything ties together
-
-6. **State machines**: Mode/stage transitions
-   - Flow between states
-
-7. **Web UI**: HTML generation
-   - How dashboard works
-
-8. **Serial commands**: Command handler
-   - Debugging interface
+| Very fast | Component test running |
+| Fast | Abort/error |
+| Quick (~200 ms toggle) | Armed |
+| Solid | Starting / running |
+| Medium | Idle stable |
+| Faster | Cooldown |
+| Slow heartbeat | Waiting |
 
 ---
 
 ## 🐛 Debugging Tips
 
-### **Check RPM Signal Quality**
-```
-Serial: rpmdetail
-Look for: rejectPct <5%, jitterPct <15%
-If high: Check magnet position, hall sensor wiring, EMI
-```
-
-### **Monitor EGT Reading**
-```
-Expected range: 25-700°C
-If reading NAN: Check thermocouple connection, SPI wiring
-If fault code: See egtFaultString() for interpretation
-```
-
-### **Verify Fuel Flow**
-```
-Use pump test from checklist
-Monitor SD log for pump_us values
-Compare against kPumpMap table
-```
-
-### **Test Starter Torque**
-```
-Use starter test from checklist
-Increase starterPurgeUs/spinUs/assistUs if weak
-```
+- **RPM quality**: `rpmdetail on` → want rejectPct <5%, jitter <15%, NOISE=CLEAN.
+  A value pinned regardless of PWM ⇒ input frequency isn't changing (EMI at the
+  fixed 50 Hz PWM, or a current-limited motor) — see the DSO152 section of
+  `COMMISSIONING_GUIDE.md`.
+- **EGT**: NaN/fault → check thermocouple + SPI; `egtFaultString()` decodes faults.
+- **Fuel flow**: `pumptest`, compare SD `pump_us` against `kPumpMap`.
+- **Starter torque**: `starttest`; tune `set purgeus/spinus/assistus`.
 
 ---
 
-## 📚 Key Files & Lines
-
-| Section | Lines |
-|---------|-------|
-| Configuration struct | 102-167 |
-| State enums | 169-170 |
-| EGT handling | 217-222, 394-401 |
-| RPM diagnostics | 224-261, 375-391 |
-| Fuel calibration | 96-100, 403-421 |
-| Button logic | 329-334 |
-| Output control | 423-434 |
-| Mode/stage functions | 435-449 |
-| Web UI | 265-273 |
-| SD logging | 275-280 |
-| Test checklist | 287-326 |
-
----
-
-## 🚀 Next Steps
-
-Now that you understand the architecture:
-
-1. **Review the main loop** - See how all parts work together
-2. **Trace a start sequence** - Follow the state transitions
-3. **Examine error handling** - How aborts work
-4. **Study specific subsystems**:
-   - RPM ISR (lines ~1500+)
-   - Web server routes (lines ~1600+)
-   - Fuel controller logic (lines ~1300+)
-
----
-
-**Document Version**: 1.0  
-**Last Updated**: 2026-07-16  
-**Firmware Version**: TestV1_EGT_DRY_START_PATCH
+**Document Version**: 1.1
+**Last Updated**: 2026-07-18
+**Firmware**: ECU_TestV1_EGT_DRY_START_PATCH (raw-LEDC PWM, runtime-tunable, no kick)
