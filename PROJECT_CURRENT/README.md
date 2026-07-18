@@ -1,7 +1,7 @@
 # PROJECT_CURRENT — Dự Án ECU Đang Phát Triển
 
 **Trạng thái**: Đang phát triển tích cực  
-**Cập nhật**: 2026-07-16
+**Cập nhật**: 2026-07-18
 
 ---
 
@@ -35,7 +35,7 @@ PROJECT_CURRENT/
 1. Mở `Firmware/ECU_TestV1_EGT_DRY_START_PATCH/ECU_TestV1_EGT_DRY_START_PATCH.ino`  
    bằng **Arduino IDE**
 2. Board: **ESP32 Dev Module** (hoặc NodeMCU-32S)
-3. Thư viện cần: `ESP32Servo`, `Adafruit_MAX31855`, `WiFi`, `WebServer`, `SD`
+3. Thư viện cần: `Adafruit_MAX31855`, `WiFi`, `WebServer`, `SD` (ESC PWM dùng LEDC có sẵn trong ESP32 core — **không** cần `ESP32Servo`, xem `CLAUDE.md`)
 4. Upload → Mở Serial Monitor 115200 baud
 
 ### Truy Cập Web UI

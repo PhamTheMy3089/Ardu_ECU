@@ -908,4 +908,4 @@ _______________________________________________
 - `REFERENCES/Documentation/Engine_Manual_NewerModel.pdf` / `_Chinese.pdf` — manual EnJet G3/E86, nguồn valve1/valve2 role split
 - `TEST/TEST_STARTER/TEST_STARTER.ino` — firmware bench dùng ở Giai đoạn 2B
 
-**Phiên bản**: 3.0 — 2026-07-16 (gộp Upload/Test + Pre-Engine-Test + DSO152 + Commissioning thành 1 file)
+**Phiên bản**: 3.1 — 2026-07-18 (gộp Upload/Test + Pre-Engine-Test + DSO152 + Commissioning thành 1 file)

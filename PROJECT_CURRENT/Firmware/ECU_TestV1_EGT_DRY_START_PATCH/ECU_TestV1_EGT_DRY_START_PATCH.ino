@@ -134,6 +134,14 @@ static const uint32_t STATUS_PRINT_MS = 250;
 static const uint32_t STAGE2_ARM_TIME_MS = 10000;
 static const uint32_t STARTER_PROVE_TIMEOUT_MS = 1500;
 static const uint32_t VALVE_TEST_TIMEOUT_MS = 10000;  // bench valve1/valve2 "on" auto-off window
+// Faster RPM-loss detection while fueled at running RPM (IDLING/OPERATING), so fuel
+// is cut promptly after a real flameout instead of waiting the full 1s signal timeout.
+static const uint32_t FUELED_RPM_LOSS_TIMEOUT_MS = 400;
+// Short EGT look-ahead used only by the OVER_TEMP hard abort, to compensate for the
+// ~1-sample (EGT_READ_PERIOD_MS) staleness of egt.c so a fast rise cannot overshoot
+// maxEgtC by ~one sample before the abort reacts. Deliberately small (not the 3s
+// fuel-control look-ahead) so it does not false-trip on normal light-off gradients.
+static const float EGT_ABORT_LOOKAHEAD_S = 0.2f;
 static const uint32_t SD_LOG_PERIOD_MS = 500;       // light telemetry logging: 2 lines/sec while active
 static const uint32_t SD_SPI_HZ = 1000000;          // tested OK after FAT32 format; lower to 400000 if needed
 
@@ -244,6 +252,7 @@ enum StartStage : uint8_t { ST_NONE, ST_PURGE, ST_SPINUP_PREHEAT, ST_INTRO_FUEL,
 EcuMode ecuMode = MODE_WAITING;
 StartStage startStage = ST_NONE;
 uint32_t modeEnteredMs = 0, stageEnteredMs = 0, starterAboveReleaseSinceMs = 0, lastPumpStepMs = 0;
+uint32_t runningSinceMs = 0;  // first time stable IDLING was reached this run; NOT reset by IDLING<->OPERATING toggles (flameout grace anchor)
 uint32_t ignitionDetectedMs = 0;  // set when EGT crosses ignition threshold; anchors the post-ignition RPM-rise check
 bool cooldownAfterAbort = false;
 bool stage2Armed = false;
@@ -531,8 +540,12 @@ void fuelValvesAuto(bool on) {
   // main circuit alone carries fuel for the rest of IDLING/OPERATING.
   valve1Cmd = on && (ecuMode == MODE_STARTING);
 }
-void forceSafeOutputs() { fuelTargetRpm = 0; fuelTargetUs = ESC_SAFE_US; pumpUs = ESC_SAFE_US; startUs = ESC_SAFE_US; ignCmd = valve1Cmd = valve2Cmd = false; applyOutputs(); }
+void forceSafeOutputs() { fuelTargetRpm = 0; fuelTargetUs = ESC_SAFE_US; pumpUs = ESC_SAFE_US; startUs = ESC_SAFE_US; ignCmd = valve1Cmd = valve2Cmd = false; manualValve1OffAtMs = manualValve2OffAtMs = 0; applyOutputs(); }
 void enterMode(EcuMode m) {
+  // Anchor the flameout grace to the FIRST stable idle of this run so it is not
+  // re-armed by later IDLING<->OPERATING throttle toggles (which would mask a
+  // real flameout occurring during throttle changes).
+  if (ecuMode == MODE_STARTING && m == MODE_IDLING) runningSinceMs = millis();
   if (ecuMode != m) addLog(String("MODE -> ") + modeName(m));
   ecuMode = m;
   modeEnteredMs = millis();
@@ -831,6 +844,11 @@ void setFuelTargetUs(int us) {
 bool egtAllowsFuelIncrease() {
   if (!egt.ok) return false;
   if (egt.c >= cfg.maxEgtC) return false;
+  // During the start sequence a fast EGT rise at light-off is normal and the engine
+  // NEEDS fuel to accelerate to idle; only the absolute maxEgtC limits here (the
+  // OVER_TEMP abort with its short look-ahead is the safety net). Gradient + 3s
+  // projected-temp limiting apply only in steady IDLING/OPERATING.
+  if (ecuMode == MODE_STARTING) return true;
   if (egt.gradientCps >= cfg.maxTempGradientCps) return false;
   if ((egt.c + 3.0f * egt.gradientCps) >= cfg.maxEgtC) return false; // 3s look-ahead like Ardu_ECU
   return true;
@@ -839,6 +857,7 @@ bool egtAllowsFuelIncrease() {
 bool egtRequestsFuelCut() {
   if (!egt.ok) return true;
   if (egt.c >= cfg.maxEgtC) return true;
+  if (ecuMode == MODE_STARTING) return false;  // see egtAllowsFuelIncrease(): start rise is expected
   if (egt.gradientCps >= cfg.maxTempGradientCps) return true;
   if ((egt.c + 3.0f * egt.gradientCps) >= cfg.maxEgtC) return true;
   return false;
@@ -853,8 +872,9 @@ void updateFuelClosedLoopToRpm(int targetRpm, int minUs, int maxUs, bool lowRpmR
   bool rpmOk = rpmMeasurementUsable() && rpmData.rpm > 1000.0f;
   bool rpmTooHigh = rpmOk && ((rpmData.rpm > (float)(targetRpm + cfg.rpmTolerance)) || (rpmData.rpm >= (float)cfg.maxRpm));
   bool rpmTooLow = rpmOk && (rpmData.rpm < (float)targetRpm);
+  bool egtCut = egtRequestsFuelCut();
 
-  if (egtRequestsFuelCut() || rpmTooHigh) {
+  if (egtCut || rpmTooHigh) {
     fuelTargetUs -= cfg.fuelCutStepUs;
   } else if (rpmTooLow && egtAllowsFuelIncrease()) {
     fuelTargetUs += cfg.fuelStepUs;
@@ -864,9 +884,23 @@ void updateFuelClosedLoopToRpm(int targetRpm, int minUs, int maxUs, bool lowRpmR
   }
 
   fuelTargetUs = constrain(fuelTargetUs, minUs, maxUs);
-  stepPumpToward(fuelTargetUs,
-                 lowRpmRegion ? cfg.lowAccelStepDelayMs : cfg.accelStepDelayMs,
-                 lowRpmRegion ? cfg.lowDecelStepDelayMs : cfg.decelStepDelayMs);
+
+  if (egtCut && pumpUs > minUs) {
+    // Over-temp / over-gradient is an emergency. The normal ramp only moves pumpUs
+    // 1us per decel-delay (~2us/s in the low region), far too slow to actually
+    // reduce fuel before EGT hits the hard OVER_TEMP abort. Here step the ACTUAL
+    // output down by fuelCutStepUs at the fast decel rate so soft protection can
+    // keep up (~40us/s), while still bounded by the hard abort.
+    uint32_t now = millis();
+    if (now - lastPumpStepMs >= cfg.decelStepDelayMs) {
+      pumpUs = (int)max(minUs, pumpUs - cfg.fuelCutStepUs);
+      lastPumpStepMs = now;
+    }
+  } else {
+    stepPumpToward(fuelTargetUs,
+                   lowRpmRegion ? cfg.lowAccelStepDelayMs : cfg.accelStepDelayMs,
+                   lowRpmRegion ? cfg.lowDecelStepDelayMs : cfg.decelStepDelayMs);
+  }
 }
 
 bool rpmSignalRecentWithin(uint32_t timeoutMs) {
@@ -1519,7 +1553,7 @@ String webStatusJson() {
   String ckWhy;
   bool ckOk = checklistPassedForAutoStart(ckWhy);
   String s;
-  s.reserve(2048);  // pre-size for the full payload (status + checklist + logs + cfg) to avoid heap churn per /api poll
+  s.reserve(2560);  // pre-size for the full payload (status + checklist + 16 logs + cfg) to avoid heap churn per /api poll
   s = "{";
   s += "\"mode\":\"" + String(modeName(ecuMode)) + "\",";
   s += "\"stage\":\"" + String(stageName(startStage)) + "\",";
@@ -1836,7 +1870,12 @@ void updateIdling() {
 
 void updateOperating() {
   fuelValvesAuto(true); ignCmd = false; startUs = ESC_SAFE_US;
-  int targetRpm = cfg.idleRpm + (int)lroundf(((float)(cfg.maxRpm - cfg.idleRpm) * (float)throttlePct) / 100.0f);
+  // Governed operating ceiling sits one rpmTolerance BELOW maxRpm so that 100%
+  // throttle does not target the redline itself and trip its own OVERSPEED abort
+  // (which fires at rpm >= maxRpm) on any overshoot/noise.
+  int operatingMaxRpm = cfg.maxRpm - cfg.rpmTolerance;
+  if (operatingMaxRpm < cfg.idleRpm) operatingMaxRpm = cfg.idleRpm;
+  int targetRpm = cfg.idleRpm + (int)lroundf(((float)(operatingMaxRpm - cfg.idleRpm) * (float)throttlePct) / 100.0f);
   updateFuelClosedLoopToRpm(targetRpm, ESC_SAFE_US, cfg.maxFuelUs, false);
   if (throttlePct <= 0) { enterMode(MODE_IDLING); fuelTargetUs = pumpUs; Serial.println("OPERATING -> IDLING"); }
 }
@@ -1881,23 +1920,46 @@ void updateCooldown() {
 
 void checkFailures() {
   if (ecuMode == MODE_WAITING || ecuMode == MODE_COOLDOWN || ecuMode == MODE_ABORTED) return;
-  // Comm watchdog: while fueled (IDLING/OPERATING), require a live operator link
-  // (Serial/Web command or the Web UI's automatic /api poll) within commTimeoutMs.
-  // Without this, a closed browser tab or dropped serial session would leave the
-  // engine running at the last commanded throttle with nothing watching it.
-  if (cfg.commWatchdogEnabled && !runStartedByButton && (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) &&
-      millis() - lastOperatorLinkMs > cfg.commTimeoutMs) { abortAll("COMM_TIMEOUT"); return; }
-  if (!dryStartActive && cfg.abortOnEgtFault && !egt.ok) { abortAll("EGT_FAULT"); return; }
-  if (egt.ok && egt.c >= cfg.maxEgtC) { abortAll("OVER_TEMP"); return; }
-  if (rpmMeasurementUsable() && rpmData.rpm >= cfg.maxRpm) { abortAll("OVERSPEED"); return; }
+
   bool fueled = (pumpUs > ESC_SAFE_US + 10) || valve1Cmd || valve2Cmd;
-  // Any fueled state must have a live RPM signal. Covering the whole MODE_STARTING
-  // (not just ST_ACCEL_TO_IDLE) closes the gap in ST_INTRO_FUEL / ST_POST_IGNITION_HEAT,
-  // where fuel valves are already open: without this, a broken RPM wire would leave
-  // fuel flowing until the NO_IGNITION timeout. Non-fueled early stages (PURGE,
-  // SPINUP) keep fueled=false so they are not affected.
-  if (cfg.abortOnRpmFault && fueled && (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING || ecuMode == MODE_STARTING) && (!rpmMeasurementUsable() || !rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS))) { abortAll("RPM_SIGNAL_LOST"); return; }
-  if ((ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) && fueled && rpmMeasurementUsable() && rpmData.rpm < cfg.flameoutRpm && millis() - modeEnteredMs > 1500UL) { abortAll("FLAMEOUT"); return; }
+
+  // Comm watchdog: while fuel is flowing, require a live operator link (Serial/Web
+  // command or the Web UI's automatic /api poll) within commTimeoutMs. Covers
+  // IDLING/OPERATING and the fuel-flowing STARTING stages (INTRO_FUEL onward), so a
+  // dropped link during a start does not leave the engine fueling unattended. Dry
+  // early stages (PURGE/SPINUP, fueled=false) and button-started runs are exempt.
+  if (cfg.commWatchdogEnabled && !runStartedByButton &&
+      (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING || (ecuMode == MODE_STARTING && fueled)) &&
+      millis() - lastOperatorLinkMs > cfg.commTimeoutMs) { abortAll("COMM_TIMEOUT"); return; }
+
+  if (!dryStartActive && cfg.abortOnEgtFault && !egt.ok) { abortAll("EGT_FAULT"); return; }
+  // OVER_TEMP: also preempt the ~1-sample (EGT_READ_PERIOD_MS) staleness of egt.c
+  // with a short look-ahead so a fast rise cannot overshoot maxEgtC by ~one sample.
+  if (egt.ok && (egt.c >= (float)cfg.maxEgtC ||
+      (egt.gradientCps > 0.0f && (egt.c + EGT_ABORT_LOOKAHEAD_S * egt.gradientCps) >= (float)cfg.maxEgtC))) { abortAll("OVER_TEMP"); return; }
+  if (rpmMeasurementUsable() && rpmData.rpm >= cfg.maxRpm) { abortAll("OVERSPEED"); return; }
+
+  // Any fueled state must have a live RPM signal.
+  //  - MODE_STARTING (light-off, igniter on): ignition EMI can transiently classify
+  //    the signal NOISY; there we require only that pulses are still ARRIVING
+  //    (recency within the 1s timeout), not a CLEAN class, so EMI cannot false-abort
+  //    a start. A truly dead sensor still trips via recency.
+  //  - IDLING/OPERATING (running RPM): use the shorter FUELED_RPM_LOSS_TIMEOUT_MS so
+  //    fuel is cut promptly after a real flameout instead of ~1s later.
+  if (cfg.abortOnRpmFault && fueled) {
+    bool lost = false;
+    if (ecuMode == MODE_STARTING)
+      lost = !rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS);
+    else if (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING)
+      lost = (!rpmMeasurementUsable() || !rpmSignalRecentWithin(FUELED_RPM_LOSS_TIMEOUT_MS));
+    if (lost) { abortAll("RPM_SIGNAL_LOST"); return; }
+  }
+
+  // Flameout grace is anchored to runningSinceMs (first stable idle of the run), not
+  // modeEnteredMs, so repeated IDLING<->OPERATING throttle toggles cannot keep
+  // re-arming the grace and masking a real flameout.
+  if ((ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) && fueled && rpmMeasurementUsable() &&
+      rpmData.rpm < cfg.flameoutRpm && millis() - runningSinceMs > 1500UL) { abortAll("FLAMEOUT"); return; }
 }
 
 void printConfig() {
@@ -1952,8 +2014,8 @@ void printHelp() {
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
   Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us> | set pumptestus <us>");
   Serial.println("set purgeus <us> | set spinus <us> | set assistus <us> -> starter crank PWM (1000..1500)");
-  Serial.println("  (all PWM/limit tuning: intro/idleus/maxus/pumptestus/purgeus/spinus/assistus/idlerpm/maxrpm/rpmtol/maxegt only in WAITING/ABORTED)");
-  Serial.println("set idlerpm <rpm> | set maxrpm <rpm> | set rpmtol <rpm> | set maxegt <C>");
+  Serial.println("  (all PWM/limit tuning: intro/idleus/maxus/pumptestus/purgeus/spinus/assistus/idlerpm/maxrpm/rpmtol/maxegt/maxgrad only in WAITING/ABORTED)");
+  Serial.println("set idlerpm <rpm> | set maxrpm <rpm> | set rpmtol <rpm> | set maxegt <C> | set maxgrad <C/s>");
   Serial.println("set acceltoidlems <ms> | set cooldownms <minMs> <timeoutMs> | set cooltarget <C> | set coolstarter <us>");
   Serial.println("set throttle <0..100> | set accelms <ms> | set decelms <ms> | set lowaccelms <ms> | set lowdecelms <ms>");
   Serial.println("set commtimeout <3000..60000> -> comm watchdog window (ms) while IDLING/OPERATING");
@@ -2186,7 +2248,7 @@ void handleCommand(String cmd) {
   if ((cmd.startsWith("set intro ") || cmd.startsWith("set idleus ") || cmd.startsWith("set maxus ") ||
        cmd.startsWith("set purgeus ") || cmd.startsWith("set spinus ") || cmd.startsWith("set assistus ") ||
        cmd.startsWith("set idlerpm ") || cmd.startsWith("set maxrpm ") || cmd.startsWith("set rpmtol ") ||
-       cmd.startsWith("set maxegt ") || cmd.startsWith("set pumptestus ")) &&
+       cmd.startsWith("set maxegt ") || cmd.startsWith("set maxgrad ") || cmd.startsWith("set pumptestus ")) &&
       ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) {
     Serial.println("ERROR: PWM/limit tuning only in WAITING/ABORTED (not while running).");
     return;
@@ -2202,6 +2264,7 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set maxrpm ")) { int r = numberAfter(cmd, "set maxrpm "); if (r < cfg.idleRpm + 5000 || r > 160000) { Serial.println("ERROR: maxrpm must be idleRpm+5000..160000"); return; } cfg.maxRpm = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set rpmtol ")) { int r = numberAfter(cmd, "set rpmtol "); if (r < 500 || r > 15000) { Serial.println("ERROR: rpmtol 500..15000"); return; } cfg.rpmTolerance = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set maxegt ")) { int t = numberAfter(cmd, "set maxegt "); if (t < 400 || t > 950) { Serial.println("ERROR: maxegt 400..950"); return; } cfg.maxEgtC = t; Serial.println("OK"); return; }
+  if (cmd.startsWith("set maxgrad ")) { int g = numberAfter(cmd, "set maxgrad "); if (g < 50 || g > 1000) { Serial.println("ERROR: maxgrad 50..1000 C/s"); return; } cfg.maxTempGradientCps = g; Serial.println("OK"); return; }
   if (cmd.startsWith("set acceltoidlems ")) { int v = numberAfter(cmd, "set acceltoidlems "); if (v < 5000 || v > 60000) { Serial.println("ERROR: acceltoidlems 5000..60000"); return; } cfg.accelToIdleTimeoutMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set cooltarget ")) { int v = numberAfter(cmd, "set cooltarget "); if (v < 50 || v > 250) { Serial.println("ERROR: cooltarget 50..250 C"); return; } cfg.cooldownTargetC = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set coolstarter ")) { int v = numberAfter(cmd, "set coolstarter "); if (v < 1000 || v > 1200) { Serial.println("ERROR: coolstarter 1000..1200 us"); return; } cfg.cooldownStarterUs = v; Serial.println("OK"); return; }
