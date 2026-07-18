@@ -39,16 +39,9 @@
     ppr <n>     Số xung / vòng (1=nam châm, 2=quang học...) mặc định 1
     filter <us> Bộ lọc glitch RPM (20..2000us) mặc định 120us
     edge rising|falling   Cạnh kích RPM, mặc định rising
-    kickus <us> Mức PWM kick lúc bắt đầu từ OFF (1000..2000us) mặc định 1300
-    kickms <ms> Thời gian giữ kick trước khi hạ về PWM ổn định (0..2000ms,
-                mặc định 300ms, 0=tắt kick)
     reset       Xóa bộ đếm & lịch sử RPM
     status      In trạng thái ngay
     help        In lại danh sách lệnh
-
-  Kick: khi PWM chuyển từ OFF (<=1000us) lên bất kỳ giá trị >1000us, starter
-  được cấp kickUs trong kickMs trước rồi mới hạ về đúng mức PWM đã yêu cầu.
-  Giúp starter có cơ cấu Bendix/clutch ăn khớp dứt khoát thay vì trượt/khựng.
   ============================================================================
 */
 
@@ -120,12 +113,6 @@ int      pwmUs        = ESC_SAFE_US;   // PWM starter hiện tại (bắt đầu
 int      pwmStepUs    = 10;            // bước +/-
 int      pulsesPerRev = 1;             // xung / vòng
 
-// ---------------- Kick (brief high pulse when starting from OFF) ----------------
-// Helps a starter with a Bendix/clutch mechanism engage decisively instead of
-// slipping/stalling, mirroring the main ECU firmware's starterKickUs/Ms.
-int      kickUs       = 1300;
-uint32_t kickMs        = 300;   // 0 disables the kick
-uint32_t kickUntilMs   = 0;     // 0 = not currently in the kick window
 volatile uint32_t rpmMinPulseUs = 120; // bộ lọc glitch phần cứng
 int      rpmEdgeMode  = RISING;
 
@@ -333,22 +320,15 @@ const char* stabilityVerdict() {
 // ============================================================================
 //  Output control
 // ============================================================================
-// Called every loop() (not just on change) so a timed kick decays into the
-// steady pwmUs automatically once kickUntilMs passes, without needing
-// another command.
+// Writes the current pwmUs to the starter ESC. Called on every change and
+// once per loop() to keep the ESC signal refreshed.
 void applyPwm() {
-  int outputUs = (kickUntilMs != 0 && millis() < kickUntilMs) ? kickUs : pwmUs;
-  escWriteUs(PIN_ESC_START, LEDC_CH_START, outputUs);
+  escWriteUs(PIN_ESC_START, LEDC_CH_START, pwmUs);
 }
 
 void setPwm(int us, bool markChange) {
   int old = pwmUs;
   int newUs = constrain(us, ESC_MIN_US, ESC_MAX_US);
-  if (newUs <= ESC_SAFE_US) {
-    kickUntilMs = 0;   // stopping always takes effect immediately, never overridden by a stale kick
-  } else if (old <= ESC_SAFE_US && kickMs > 0) {
-    kickUntilMs = millis() + kickMs;   // starting from OFF: arm the kick
-  }
   pwmUs = newUs;
   applyPwm();
   if (markChange && pwmUs != old) {
@@ -365,7 +345,6 @@ void printStatus() {
   float cv = rpmCvPct();
   Serial.print("PWM=");    Serial.print(pwmUs);      Serial.print("us");
   if (pwmUs <= ESC_SAFE_US) Serial.print("(OFF)");
-  if (kickUntilMs != 0 && millis() < kickUntilMs) Serial.print("(KICK)");
   Serial.print(" | RPM="); Serial.print(rpm.rpm, 0);
   Serial.print(" (win ");  Serial.print(rpm.rpmWindow, 0); Serial.print(")");
   Serial.print(" | raw="); Serial.print(rpm.raw);
@@ -390,17 +369,13 @@ void printHelp() {
   Serial.println("  ppr <n>     xung/vong (mac dinh 1)");
   Serial.println("  filter <us> bo loc glitch RPM (20..2000)");
   Serial.println("  edge rising|falling   canh kich RPM");
-  Serial.println("  kickus <us> muc PWM kick luc bat dau tu OFF (1000..2000, mac dinh 1300)");
-  Serial.println("  kickms <ms> thoi gian kick truoc khi ha ve pwm on dinh (0..2000, 0=tat)");
   Serial.println("  reset       xoa bo dem RPM");
   Serial.println("  status      in trang thai ngay");
   Serial.println("  help        in menu nay");
   Serial.print  ("  hien tai: step="); Serial.print(pwmStepUs);
   Serial.print  ("us ppr=");           Serial.print(pulsesPerRev);
   Serial.print  (" filter=");          Serial.print((uint32_t)rpmMinPulseUs);
-  Serial.print  ("us edge=");          Serial.print(rpmEdgeMode == FALLING ? "FALLING" : "RISING");
-  Serial.print  (" kickUs=");          Serial.print(kickUs);
-  Serial.print  ("us kickMs=");        Serial.println(kickMs);
+  Serial.print  ("us edge=");          Serial.println(rpmEdgeMode == FALLING ? "FALLING" : "RISING");
   Serial.println("==================================================");
   Serial.println();
 }
@@ -450,18 +425,6 @@ void handleWordCommand(String cmd) {
   }
   if (cmd == "edge rising")  { rpmEdgeMode = RISING;  reattachRpm(); resetRpmStats(); Serial.println("edge=RISING");  return; }
   if (cmd == "edge falling") { rpmEdgeMode = FALLING; reattachRpm(); resetRpmStats(); Serial.println("edge=FALLING"); return; }
-  if (cmd.startsWith("kickus")) {
-    long v = numberAfter(cmd, "kickus");
-    if (v >= ESC_MIN_US && v <= ESC_MAX_US) { kickUs = (int)v; Serial.print("kickUs="); Serial.print(kickUs); Serial.println("us"); }
-    else Serial.println("ERROR: kickus 1000..2000");
-    return;
-  }
-  if (cmd.startsWith("kickms")) {
-    long v = numberAfter(cmd, "kickms");
-    if (v >= 0 && v <= 2000) { kickMs = (uint32_t)v; Serial.print("kickMs="); Serial.print(kickMs); Serial.println("ms (0=disabled)"); }
-    else Serial.println("ERROR: kickms 0..2000");
-    return;
-  }
 
   Serial.print("Unknown cmd: "); Serial.println(cmd);
 }
@@ -502,7 +465,6 @@ String webStatusJson() {
   s.reserve(384);
   s = "{";
   s += "\"pwm\":\"" + String(pwmUs) + (pwmUs <= ESC_SAFE_US ? " (OFF)" : "") + "\",";
-  s += "\"kick\":\"" + String((kickUntilMs != 0 && millis() < kickUntilMs) ? "ON" : "off") + "\",";
   s += "\"rpm\":\"" + String(rpm.rpm, 0) + "\",";
   s += "\"rpmWindow\":\"" + String(rpm.rpmWindow, 0) + "\",";
   s += "\"raw\":\"" + String(rpm.raw) + "\",";
@@ -516,9 +478,7 @@ String webStatusJson() {
   s += "\"step\":\"" + String(pwmStepUs) + "\",";
   s += "\"ppr\":\"" + String(pulsesPerRev) + "\",";
   s += "\"filter\":\"" + String((uint32_t)rpmMinPulseUs) + "\",";
-  s += "\"edge\":\"" + String(rpmEdgeMode == FALLING ? "FALLING" : "RISING") + "\",";
-  s += "\"kickUs\":\"" + String(kickUs) + "\",";
-  s += "\"kickMs\":\"" + String(kickMs) + "\"";
+  s += "\"edge\":\"" + String(rpmEdgeMode == FALLING ? "FALLING" : "RISING") + "\"";
   s += "}";
   return s;
 }
@@ -539,12 +499,8 @@ input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;p
 <h2>Starter</h2><div class="btns">
 <button class="btn go" onclick="cmd('+')">+ step</button><button class="btn" onclick="cmd('-')">- step</button><button class="btn danger" onclick="cmd('0')">STOP</button>
 </div>
-<div class="row">PWM us <input id="pwm" value="1150"><button class="btn" onclick="cmd('pwm '+v('pwm'))">Set PWM</button></div>
+<div class="row">PWM us <input id="pwm" value="1200"><button class="btn" onclick="cmd('pwm '+v('pwm'))">Set PWM</button></div>
 <div class="row">Step us <input id="step" value="10"><button class="btn" onclick="cmd('step '+v('step'))">Set step</button></div>
-<h2>Kick</h2><div class="row">
-Kick us <input id="kus" value="1300"><button class="btn" onclick="cmd('kickus '+v('kus'))">Set</button>
-Kick ms <input id="kms" value="300"><button class="btn" onclick="cmd('kickms '+v('kms'))">Set</button>
-</div>
 <h2>RPM sensor</h2><div class="row">
 Filter us <input id="filt" value="120"><button class="btn" onclick="cmd('filter '+v('filt'))">Set</button>
 PPR <input id="ppr" value="1"><button class="btn" onclick="cmd('ppr '+v('ppr'))">Set</button>
@@ -554,7 +510,7 @@ PPR <input id="ppr" value="1"><button class="btn" onclick="cmd('ppr '+v('ppr'))"
 </div><script>
 function v(id){return document.getElementById(id).value}
 function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,200))}
-function load(){fetch('/api').then(r=>r.json()).then(d=>{let cards=[['PWM',d.pwm],['KICK',d.kick],['RPM',d.rpm],['RPM win',d.rpmWindow],['raw',d.raw],['acc',d.accepted],['rej',d.rejected],['rej%',d.rejectPct],['jit%',d.jitterPct],['cv%',d.cv],['NOISE',d.noise],['STAB',d.stab],['step',d.step],['ppr',d.ppr],['filter',d.filter],['edge',d.edge],['kickUs',d.kickUs],['kickMs',d.kickMs]];
+function load(){fetch('/api').then(r=>r.json()).then(d=>{let cards=[['PWM',d.pwm],['RPM',d.rpm],['RPM win',d.rpmWindow],['raw',d.raw],['acc',d.accepted],['rej',d.rejected],['rej%',d.rejectPct],['jit%',d.jitterPct],['cv%',d.cv],['NOISE',d.noise],['STAB',d.stab],['step',d.step],['ppr',d.ppr],['filter',d.filter],['edge',d.edge]];
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');});}
 setInterval(load,700);load();
 </script></body></html>
@@ -607,7 +563,7 @@ void loop() {
   handleSerial();
   server.handleClient();
   updateRpm();
-  applyPwm();   // re-apply every loop so a timed kick decays into steady pwmUs on its own
+  applyPwm();   // keep the starter ESC signal refreshed each loop
 
   uint32_t nowMs = millis();
   if (nowMs - lastStatusMs >= STATUS_PRINT_MS) {

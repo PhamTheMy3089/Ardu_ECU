@@ -38,8 +38,8 @@ WiFi: TEST_STARTER  |  Pass: test1234
 URL:  http://192.168.4.1
 ```
 
-Dashboard hiện đầy đủ PWM/KICK/RPM/NOISE/STAB và có nút/ô nhập cho toàn bộ
-lệnh (`+`/`-`/STOP, đặt PWM, step, kick us/ms, filter, ppr, edge, reset) —
+Dashboard hiện đầy đủ PWM/RPM/NOISE/STAB và có nút/ô nhập cho toàn bộ
+lệnh (`+`/`-`/STOP, đặt PWM, step, filter, ppr, edge, reset) —
 tiện khi test bằng điện thoại đứng cạnh bàn test thay vì cắm laptop.
 
 ---
@@ -74,17 +74,11 @@ tiện khi test bằng điện thoại đứng cạnh bàn test thay vì cắm l
 | `ppr <n>` | Số xung/vòng (1=nam châm, 2=quang học) |
 | `filter <us>` | Bộ lọc glitch RPM (20..2000), mặc định 120 |
 | `edge rising\|falling` | Cạnh kích RPM |
-| `kickus <us>` | Mức PWM kick lúc bắt đầu từ OFF (1000..2000), mặc định 1300 |
-| `kickms <ms>` | Thời gian giữ kick trước khi hạ về PWM ổn định (0..2000, 0=tắt) |
 | `reset` | Xóa bộ đếm & lịch sử RPM |
 | `status` | In trạng thái ngay |
 | `help` | In lại menu |
 
 > Mẹo: `+` và `-` xử lý ngay từng ký tự, có thể bấm liên tục để rà quét PWM.
-
-> **Kick**: khi PWM chuyển từ OFF (≤1000µs) lên bất kỳ giá trị >1000µs, starter
-> được cấp `kickUs` trong `kickMs` trước rồi mới hạ về đúng mức PWM đã yêu cầu —
-> giúp starter có cơ cấu Bendix/clutch ăn khớp dứt khoát thay vì trượt/khựng.
 
 > **PWM engine**: firmware này dùng LEDC trực tiếp (`ledcAttach`/`ledcWrite`),
 > không dùng thư viện `ESP32Servo` — xem `CLAUDE.md` ở gốc repo để biết lý do

@@ -514,19 +514,12 @@ không cần lib ngoài (LEDC PWM có sẵn trong core).
 | `ppr <n>` | Số xung/vòng (1=nam châm, 2=quang học) |
 | `filter <us>` | Bộ lọc glitch RPM (20..2000), mặc định 120 |
 | `edge rising\|falling` | Cạnh kích RPM |
-| `kickus <us>` | Mức PWM kick lúc bắt đầu từ OFF (1000..2000), mặc định 1300 |
-| `kickms <ms>` | Thời gian giữ kick trước khi hạ về PWM ổn định (0..2000, 0=tắt) |
 | `reset` | Xóa bộ đếm & lịch sử RPM |
 | `status` / `help` | In trạng thái / menu lệnh |
 
-> **Kick**: khi PWM chuyển từ OFF lên bất kỳ giá trị >1000µs, starter được cấp
-> `kickUs` trong `kickMs` trước rồi mới hạ về mức PWM đã yêu cầu — giúp starter
-> có cơ cấu Bendix/clutch ăn khớp dứt khoát thay vì trượt/khựng. Firmware ECU
-> chính có tính năng tương đương qua `set starterkickus`/`set starterkickms`
-> (áp dụng ở đầu giai đoạn `ST_PURGE`) — cũng chỉnh được từ Web UI dashboard
-> chính (mục "Starter Kick"), không bắt buộc phải dùng Serial. Mục
-> "Starter Manual Test" trên cùng dashboard cho phép chạy `starttest <us> <ms>`
-> trực tiếp từ trình duyệt (cần `arm2` trước, có nút riêng).
+> Firmware ECU chính có mục **"Starter Manual Test"** trên Web UI dashboard
+> cho phép chạy `starttest <us> <ms>` trực tiếp từ trình duyệt (cần `arm2`
+> trước, có nút riêng) — không bắt buộc phải dùng Serial.
 
 **Đọc dòng trạng thái** (in 2 lần/giây):
 ```
@@ -598,7 +591,7 @@ chỉnh firmware để né test).
 
 **Component test khác (tùy chọn, bench-only)**:
 ```
-starttest <us> <ms>   -> vd: starttest 1100 3000
+starttest <us> <ms>   -> vd: starttest 1200 3000
 ignpulse <ms>          -> vd: ignpulse 1500
 valve1 on/off | valve2 on/off
 ```
@@ -611,8 +604,12 @@ valve1 on/off | valve2 on/off
 
 ```
 arm2
-pumptest 1100 1500   -> bơm chạy 1500ms ở 1100us, đo ml thực tế đối chiếu bảng calib
+pumptest 1210 1500   -> bơm chạy 1500ms ở 1210us, đo ml thực tế đối chiếu bảng calib
 ```
+
+> Trần bench `pumptest` hiện là **1000..1225µs**. Nút "Pump prime" trên Web UI
+> chạy ở `introFuelUs` = **1210µs** (đã tăng 50µs). Vẫn nên quét vài mức us để
+> xác nhận độ tuyến tính.
 
 **Bảng hiệu chuẩn pump** (đo thực tế, khớp firmware):
 

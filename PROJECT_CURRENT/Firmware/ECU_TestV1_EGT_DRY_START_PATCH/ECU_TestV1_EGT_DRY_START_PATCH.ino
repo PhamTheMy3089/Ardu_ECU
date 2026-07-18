@@ -220,18 +220,10 @@ struct Config {
   int fuelCutStepUs = 5;        // stronger cut for overtemp/overspeed
 
   int starterPurgeUs = 1100;
-  int starterSpinUs = 1150;
+  int starterSpinUs = 1200;
   int starterAssistUs = 1200;
 
-  // Brief high-PWM pulse at the very start of ST_PURGE, before settling to
-  // starterPurgeUs. Helps a starter with a Bendix/clutch mechanism engage
-  // decisively (static friction / clutch pop-out needs more torque than
-  // sustained cranking does), rather than starting soft and risking a
-  // slipping clutch or stall.
-  int starterKickUs = 1300;
-  uint32_t starterKickMs = 300;
-
-  int introFuelUs = 1160;       // ~50 ml/min
+  int introFuelUs = 1210;       // ~ pump prime / intro fuel
   int idleFuelUs = 1175;        // ~80 ml/min preview
   int maxFuelUs = 1260;         // ~280 ml/min preview
 
@@ -1547,12 +1539,8 @@ Max RPM <input id="maxrpm" value="110000"><button class="btn" onclick="cmd('set 
 Max EGT <input id="maxegt" value="780"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
 Throttle <input id="thr" value="0"><button class="btn" onclick="cmd('set throttle '+v('thr'))">Set</button>
 </div>
-<h2>Starter Kick (bench, WAITING/ABORTED only)</h2><div class="row small">
-Kick us <input id="kus" value="1300"><button class="btn" onclick="cmd('set starterkickus '+v('kus'))">Set</button>
-Kick ms <input id="kms" value="300"><button class="btn" onclick="cmd('set starterkickms '+v('kms'))">Set</button>
-</div>
 <h2>Starter Manual Test (no fuel/ign, bench only)</h2><div class="row small">
-PWM us <input id="sus" value="1150"> Duration ms <input id="sms" value="3000">
+PWM us <input id="sus" value="1200"> Duration ms <input id="sms" value="3000">
 <button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
 <button class="btn test" onclick="cmd('starttest '+v('sus')+' '+v('sms'))">Run</button>
 </div>
@@ -1663,13 +1651,6 @@ void beginAutoIdle() {
   }
 }
 
-// During the first cfg.starterKickMs of a stage, use the stronger kick pulse
-// instead of the steady value, to help a Bendix/clutch mechanism engage
-// decisively before settling to the gentler cranking speed.
-int starterKickOrSteady(int steadyUs) {
-  return (millis() - stageEnteredMs < cfg.starterKickMs) ? cfg.starterKickUs : steadyUs;
-}
-
 void updateDryStarting() {
   // Dry starter/RPM test used only when EGT is OPEN/faulty.
   // Fuel, valves and igniter are deliberately forced OFF on every loop.
@@ -1681,7 +1662,7 @@ void updateDryStarting() {
 
   switch (startStage) {
     case ST_PURGE:
-      startUs = starterKickOrSteady(cfg.starterPurgeUs);
+      startUs = cfg.starterPurgeUs;
       if (millis() - stageEnteredMs >= cfg.purgeTimeMs) {
         resetRpmStats();
         enterStage(ST_SPINUP_PREHEAT);
@@ -1739,7 +1720,7 @@ void updateStarting() {
   }
   switch (startStage) {
     case ST_PURGE:
-      startUs = starterKickOrSteady(cfg.starterPurgeUs); pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false);
+      startUs = cfg.starterPurgeUs; pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false);
       if (millis() - stageEnteredMs >= cfg.purgeTimeMs) { resetRpmStats(); enterStage(ST_SPINUP_PREHEAT); Serial.println("START STAGE -> SPINUP_PREHEAT"); }
       break;
     case ST_SPINUP_PREHEAT:
@@ -1861,7 +1842,6 @@ void printConfig() {
   Serial.print("rpmTolerance="); Serial.println(cfg.rpmTolerance);
   Serial.print("accelToIdleTimeoutMs="); Serial.println(cfg.accelToIdleTimeoutMs);
   Serial.print("cooldown min/timeout/target/starter="); Serial.print(cfg.cooldownMinMs); Serial.print("ms/"); Serial.print(cfg.cooldownTimeoutMs); Serial.print("ms/"); Serial.print(cfg.cooldownTargetC); Serial.print("C/"); Serial.print(cfg.cooldownStarterUs); Serial.println("us");
-  Serial.print("starterKickUs="); Serial.print(cfg.starterKickUs); Serial.print("us starterKickMs="); Serial.print(cfg.starterKickMs); Serial.println("ms");
   Serial.print("commWatchdogEnabled="); Serial.print(cfg.commWatchdogEnabled ? "ON" : "OFF"); Serial.print(" commTimeoutMs="); Serial.println(cfg.commTimeoutMs);
   Serial.print("fuelTargetRpm="); Serial.println(fuelTargetRpm);
   Serial.print("fuelTargetUs="); Serial.print(fuelTargetUs); Serial.print(" (~"); Serial.print(flowFromUs(fuelTargetUs), 1); Serial.println(" ml/min)");
@@ -1902,7 +1882,6 @@ void printHelp() {
   Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us>");
   Serial.println("set idlerpm <rpm> | set maxrpm <rpm> | set rpmtol <rpm> | set maxegt <C>");
   Serial.println("set acceltoidlems <ms> | set cooldownms <minMs> <timeoutMs> | set cooltarget <C> | set coolstarter <us>");
-  Serial.println("set starterkickus <1100..2000> | set starterkickms <0..2000> -> brief kick pulse at start of ST_PURGE, 0ms disables");
   Serial.println("set throttle <0..100> | set accelms <ms> | set decelms <ms> | set lowaccelms <ms> | set lowdecelms <ms>");
   Serial.println("set commtimeout <3000..60000> -> comm watchdog window (ms) while IDLING/OPERATING");
   Serial.println("set commwatchdog on/off -> abort if no Serial/Web link within commtimeout (arm2 required to disable)");
@@ -2071,7 +2050,7 @@ void handleCommand(String cmd) {
     int us = (sp < 0) ? args.toInt() : args.substring(0, sp).toInt();
     uint32_t ms = (sp < 0) ? 1500UL : (uint32_t)args.substring(sp + 1).toInt();
 
-    if (us < 1000 || us > 1175) { Serial.println("ERROR: bench pumptest limited 1000..1175 us"); return; }
+    if (us < 1000 || us > 1225) { Serial.println("ERROR: bench pumptest limited 1000..1225 us"); return; }
     if (ms < 200 || ms > 5000) { Serial.println("ERROR: pumptest ms 200..5000"); return; }
     if (fuelCommandBlockedByHotEgt()) {
       Serial.print("PUMPTEST BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
@@ -2137,8 +2116,6 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set acceltoidlems ")) { int v = numberAfter(cmd, "set acceltoidlems "); if (v < 5000 || v > 60000) { Serial.println("ERROR: acceltoidlems 5000..60000"); return; } cfg.accelToIdleTimeoutMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set cooltarget ")) { int v = numberAfter(cmd, "set cooltarget "); if (v < 50 || v > 250) { Serial.println("ERROR: cooltarget 50..250 C"); return; } cfg.cooldownTargetC = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set coolstarter ")) { int v = numberAfter(cmd, "set coolstarter "); if (v < 1000 || v > 1200) { Serial.println("ERROR: coolstarter 1000..1200 us"); return; } cfg.cooldownStarterUs = v; Serial.println("OK"); return; }
-  if (cmd.startsWith("set starterkickus ")) { int v = numberAfter(cmd, "set starterkickus "); if (v < 1100 || v > 2000) { Serial.println("ERROR: starterkickus 1100..2000"); return; } cfg.starterKickUs = v; Serial.println("OK"); return; }
-  if (cmd.startsWith("set starterkickms ")) { int v = numberAfter(cmd, "set starterkickms "); if (v < 0 || v > 2000) { Serial.println("ERROR: starterkickms 0..2000 (0 disables the kick)"); return; } cfg.starterKickMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set cooldownms ")) { int minMs; uint32_t timeoutMs; if (!parseTwoInts(cmd, minMs, timeoutMs)) { Serial.println("ERROR: use set cooldownms <minMs> <timeoutMs>"); return; } if (minMs < 1000 || minMs > 30000 || timeoutMs < 5000 || timeoutMs > 120000 || timeoutMs < (uint32_t)minMs) { Serial.println("ERROR: minMs 1000..30000, timeoutMs 5000..120000 and >= minMs"); return; } cfg.cooldownMinMs = (uint32_t)minMs; cfg.cooldownTimeoutMs = timeoutMs; Serial.println("OK"); return; }
   if (cmd.startsWith("set accelms ")) { int v = numberAfter(cmd, "set accelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: accelms 50..2000"); return; } cfg.accelStepDelayMs = v; Serial.println("OK"); return; }
   if (cmd.startsWith("set decelms ")) { int v = numberAfter(cmd, "set decelms "); if (v < 50 || v > 2000) { Serial.println("ERROR: decelms 50..2000"); return; } cfg.decelStepDelayMs = v; Serial.println("OK"); return; }

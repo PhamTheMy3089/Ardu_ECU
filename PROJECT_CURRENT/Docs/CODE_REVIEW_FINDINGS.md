@@ -259,6 +259,25 @@ chi tiết kỹ thuật trong `CLAUDE.md` ở gốc repo.
 
 ---
 
+# 🔧 Gỡ starter kick + tăng giá trị test (2026-07-18)
+
+Theo yêu cầu: **bỏ hẳn tính năng starter kick** (không cần công đoạn này nữa)
+và nâng giá trị test.
+
+| # | File | Thay đổi |
+|---|------|----------|
+| 1 | `ECU_TestV1_EGT_DRY_START_PATCH.ino` | Gỡ `cfg.starterKickUs`/`cfg.starterKickMs`, helper `starterKickOrSteady()`, 2 lệnh `set starterkickus`/`set starterkickms`, mục Web UI "Starter Kick", và dòng in trong printConfig/printHelp. `ST_PURGE` (cả start thật lẫn dry-start) giờ dùng thẳng `starterPurgeUs` |
+| 2 | `ECU_TestV1_EGT_DRY_START_PATCH.ino` | **starterSpinUs 1150 → 1200** (test wizard "Starter" + spin thật + default Web UI "Starter Manual Test"). **introFuelUs 1160 → 1210** (pump prime test + intro fuel thật). Nới trần bench `pumptest` 1175 → **1225µs** để đạt mức mới |
+| 3 | `TEST/TEST_STARTER/TEST_STARTER.ino` | Gỡ toàn bộ kick (globals, `applyPwm`/`setPwm`, lệnh `kickus`/`kickms`, trường JSON, mục Web UI, docstring). Default PWM Web UI 1150 → 1200 |
+
+**Lưu ý**: `introFuelUs`(1210) hiện > `idleFuelUs`(1175) — theo quyết định "đổi
+cả config chung"; ảnh hưởng cả chuỗi khởi động thật, không chỉ lệnh test.
+
+**Verify**: compile sạch cả 2 file (`g++ -fsyntax-only -Wall -Wextra`, không
+warning) + mô phỏng chèn auto-prototype kiểu Arduino cho firmware chính (OK).
+
+---
+
 **Người review**: Code Review Agent (automated)  
 **Phiên bản firmware**: ECU_TestV1_EGT_DRY_START_PATCH  
-**Lần cập nhật**: 2026-07-17 (LEDC + starter kick + Web UI cho TEST_STARTER)
+**Lần cập nhật**: 2026-07-18 (gỡ starter kick, starterSpinUs=1200, introFuelUs=1210)
