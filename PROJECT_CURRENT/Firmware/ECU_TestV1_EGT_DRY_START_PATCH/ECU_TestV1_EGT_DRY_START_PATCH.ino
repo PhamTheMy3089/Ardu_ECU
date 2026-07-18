@@ -52,6 +52,19 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
+// Forward declarations of the state enums (full definitions are further down).
+// Required because escAttach()/escWriteUs() below are now the first functions in
+// the sketch, so the Arduino IDE injects its auto-generated function prototypes
+// right here - ahead of the real enum definitions. Any auto-prototype that names
+// one of these enums (modeName(EcuMode), enterStage(StartStage), etc.) would
+// otherwise fail to compile with "'EcuMode' was not declared in this scope".
+// A fixed underlying type makes these opaque forward declarations legal (C++11).
+enum EcuMode : uint8_t;
+enum StartStage : uint8_t;
+enum RpmNoiseLevel : uint8_t;
+enum TestId : int8_t;
+enum TestResult : uint8_t;
+
 // ESC PWM is driven directly through the ESP32 LEDC peripheral instead of the
 // ESP32Servo library. ESP32Servo's internal timer/LEDC setup has been observed
 // to produce an unstable pulse on some ESP32 Arduino core versions (core 3.x
