@@ -1539,6 +1539,15 @@ Max RPM <input id="maxrpm" value="110000"><button class="btn" onclick="cmd('set 
 Max EGT <input id="maxegt" value="780"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
 Throttle <input id="thr" value="0"><button class="btn" onclick="cmd('set throttle '+v('thr'))">Set</button>
 </div>
+<h2>Starter &amp; Fuel PWM (chỉnh trực tiếp, 1000..1500 / 1000..1300 us)</h2><div class="row small">
+Purge us <input id="purgeus" value="1100"><button class="btn" onclick="cmd('set purgeus '+v('purgeus'))">Set</button>
+Spin us <input id="spinus" value="1200"><button class="btn" onclick="cmd('set spinus '+v('spinus'))">Set</button>
+Assist us <input id="assistus" value="1200"><button class="btn" onclick="cmd('set assistus '+v('assistus'))">Set</button>
+</div><div class="row small">
+Intro/Pump us <input id="introus" value="1210"><button class="btn" onclick="cmd('set intro '+v('introus'))">Set</button>
+Idle us <input id="idleus" value="1175"><button class="btn" onclick="cmd('set idleus '+v('idleus'))">Set</button>
+Max us <input id="maxus" value="1260"><button class="btn" onclick="cmd('set maxus '+v('maxus'))">Set</button>
+</div>
 <h2>Starter Manual Test (no fuel/ign, bench only)</h2><div class="row small">
 PWM us <input id="sus" value="1200"> Duration ms <input id="sms" value="3000">
 <button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
@@ -1847,6 +1856,7 @@ void printConfig() {
   Serial.print("fuelTargetUs="); Serial.print(fuelTargetUs); Serial.print(" (~"); Serial.print(flowFromUs(fuelTargetUs), 1); Serial.println(" ml/min)");
   Serial.print("accel/decel ms="); Serial.print(cfg.accelStepDelayMs); Serial.print("/"); Serial.print(cfg.decelStepDelayMs);
   Serial.print(" low="); Serial.print(cfg.lowAccelStepDelayMs); Serial.print("/"); Serial.println(cfg.lowDecelStepDelayMs);
+  Serial.print("starter purge/spin/assist us="); Serial.print(cfg.starterPurgeUs); Serial.print("/"); Serial.print(cfg.starterSpinUs); Serial.print("/"); Serial.println(cfg.starterAssistUs);
   Serial.print("introFuelUs="); Serial.print(cfg.introFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.introFuelUs), 1); Serial.println(" ml/min)");
   Serial.print("idleFuelUs="); Serial.print(cfg.idleFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.idleFuelUs), 1); Serial.println(" ml/min)");
   Serial.print("maxFuelUs="); Serial.print(cfg.maxFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.maxFuelUs), 1); Serial.println(" ml/min)");
@@ -1880,6 +1890,7 @@ void printHelp() {
   Serial.println("startidle             -> guarded auto-idle start sequence");
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
   Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us>");
+  Serial.println("set purgeus <us> | set spinus <us> | set assistus <us> -> starter crank PWM (1000..1500)");
   Serial.println("set idlerpm <rpm> | set maxrpm <rpm> | set rpmtol <rpm> | set maxegt <C>");
   Serial.println("set acceltoidlems <ms> | set cooldownms <minMs> <timeoutMs> | set cooltarget <C> | set coolstarter <us>");
   Serial.println("set throttle <0..100> | set accelms <ms> | set decelms <ms> | set lowaccelms <ms> | set lowdecelms <ms>");
@@ -2109,6 +2120,9 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set intro ")) { int us = numberAfter(cmd, "set intro "); if (us < 1000 || us > 1250) { Serial.println("ERROR: intro 1000..1250"); return; } cfg.introFuelUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set idleus ")) { int us = numberAfter(cmd, "set idleus "); if (us < 1000 || us > 1270) { Serial.println("ERROR: idleus 1000..1270"); return; } cfg.idleFuelUs = us; if (cfg.maxFuelUs < us) cfg.maxFuelUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set maxus ")) { int us = numberAfter(cmd, "set maxus "); if (us < 1100 || us > 1300) { Serial.println("ERROR: maxus 1100..1300"); return; } cfg.maxFuelUs = max(us, cfg.idleFuelUs); Serial.println("OK"); return; }
+  if (cmd.startsWith("set purgeus ")) { int us = numberAfter(cmd, "set purgeus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: purgeus 1000..1500"); return; } cfg.starterPurgeUs = us; Serial.println("OK"); return; }
+  if (cmd.startsWith("set spinus ")) { int us = numberAfter(cmd, "set spinus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: spinus 1000..1500"); return; } cfg.starterSpinUs = us; Serial.println("OK"); return; }
+  if (cmd.startsWith("set assistus ")) { int us = numberAfter(cmd, "set assistus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: assistus 1000..1500"); return; } cfg.starterAssistUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set idlerpm ")) { int r = numberAfter(cmd, "set idlerpm "); if (r < 10000 || r > 60000) { Serial.println("ERROR: idlerpm 10000..60000"); return; } cfg.idleRpm = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set maxrpm ")) { int r = numberAfter(cmd, "set maxrpm "); if (r < cfg.idleRpm + 5000 || r > 160000) { Serial.println("ERROR: maxrpm must be idleRpm+5000..160000"); return; } cfg.maxRpm = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set rpmtol ")) { int r = numberAfter(cmd, "set rpmtol "); if (r < 500 || r > 15000) { Serial.println("ERROR: rpmtol 500..15000"); return; } cfg.rpmTolerance = r; Serial.println("OK"); return; }

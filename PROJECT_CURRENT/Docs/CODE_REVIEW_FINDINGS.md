@@ -273,6 +273,16 @@ và nâng giá trị test.
 **Lưu ý**: `introFuelUs`(1210) hiện > `idleFuelUs`(1175) — theo quyết định "đổi
 cả config chung"; ảnh hưởng cả chuỗi khởi động thật, không chỉ lệnh test.
 
+**Không hard-code — chỉnh runtime**: các mức PWM starter/fuel giờ đổi được lúc
+chạy, không cần build lại firmware:
+- Lệnh mới: `set purgeus <us>`, `set spinus <us>`, `set assistus <us>` (1000..1500)
+  cho starterPurge/Spin/Assist. `set intro`/`set idleus`/`set maxus` đã có sẵn.
+- Web UI: thêm panel **"Starter & Fuel PWM"** với ô nhập cho purge/spin/assist +
+  intro/idle/max, mỗi ô có nút Set gọi lệnh tương ứng.
+- `printConfig` in thêm dòng `starter purge/spin/assist us=...`.
+- Giá trị trong Config struct chỉ còn là **mặc định lúc khởi động**, ghi đè
+  được bất cứ lúc nào qua Serial hoặc trình duyệt.
+
 **Verify**: compile sạch cả 2 file (`g++ -fsyntax-only -Wall -Wextra`, không
 warning) + mô phỏng chèn auto-prototype kiểu Arduino cho firmware chính (OK).
 

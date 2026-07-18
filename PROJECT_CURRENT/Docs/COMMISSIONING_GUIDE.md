@@ -608,8 +608,12 @@ pumptest 1210 1500   -> bơm chạy 1500ms ở 1210us, đo ml thực tế đối
 ```
 
 > Trần bench `pumptest` hiện là **1000..1225µs**. Nút "Pump prime" trên Web UI
-> chạy ở `introFuelUs` = **1210µs** (đã tăng 50µs). Vẫn nên quét vài mức us để
-> xác nhận độ tuyến tính.
+> chạy ở `introFuelUs` = **1210µs** (mặc định). Vẫn nên quét vài mức us để xác
+> nhận độ tuyến tính.
+>
+> **Các mức PWM này chỉnh trực tiếp được** (không hard-code): qua Serial
+> `set intro/idleus/maxus <us>` và `set purgeus/spinus/assistus <us>`, hoặc qua
+> panel **"Starter & Fuel PWM"** trên Web UI dashboard chính.
 
 **Bảng hiệu chuẩn pump** (đo thực tế, khớp firmware):
 
