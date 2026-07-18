@@ -223,7 +223,8 @@ ABORTED : hold 2s=clear (if EGT safe/deliberate)
 ### 5. Output control
 `applyOutputs()` constrains ESC values to 1000–2000 µs and writes PWM + digital
 outputs. `forceSafeOutputs()` slams everything safe (ESC 1000 µs, ign/valves OFF,
-clears manual/valve auto-off timers). Manual bench outputs (ignpulse/starttest/
+clears the valve auto-off timers; the ign/starter/pump timers are cleared in
+`stage2Off()`/`beginAutoIdle()`). Manual bench outputs (ignpulse/starttest/
 pumptest/valve-on) all have loop auto-off timers.
 
 ---
@@ -232,8 +233,8 @@ pumptest/valve-on) all have loop auto-off timers.
 
 ```
 ST_PURGE (purgeTimeMs 3s)         starter=starterPurgeUs(1100), no fuel/ign
-ST_SPINUP_PREHEAT (preheatMs)     starter=starterSpinUs(1200); needs cranking RPM (starterProveMinRpm)
-ST_INTRO_FUEL                     ign ON, valves open, fuel=introFuelUs(1160); wait ignition/fuel-confirm
+ST_SPINUP_PREHEAT (preheatMs)     starter=starterSpinUs(1200), igniter ON (preheat); needs cranking RPM (starterProveMinRpm)
+ST_INTRO_FUEL                     igniter still ON, valves open, fuel=introFuelUs(1160); wait ignition/fuel-confirm
 ST_POST_IGNITION_HEAT             hold fuel, watch RPM rise; starter -> starterAssistUs(1200)
 ST_ACCEL_TO_IDLE                  closed-loop fuel to idleRpm; starter releases; timeout=accelToIdleTimeoutMs(20s)
   └─ idle stable ► MODE_IDLING
@@ -330,7 +331,7 @@ set egtstart dry|strict | set drystartms <ms>
 |---------|---------|
 | Very fast | Component test running |
 | Fast | Abort/error |
-| Quick (2 Hz) | Armed |
+| Quick (~200 ms toggle) | Armed |
 | Solid | Starting / running |
 | Medium | Idle stable |
 | Faster | Cooldown |
