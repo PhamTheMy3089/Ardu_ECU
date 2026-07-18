@@ -56,8 +56,10 @@
 #endif
 
 // ---------------- Web UI (optional, alongside Serial) ----------------
+// SECURITY: anyone on this SoftAP can drive the starter via /cmd. Change WEB_PASS
+// to a strong private value; the default is a weak bench placeholder.
 static const char* WEB_SSID = "TEST_STARTER";
-static const char* WEB_PASS = "test1234";
+static const char* WEB_PASS = "test1234";   // <-- CHANGE ME (min 8 chars)
 WebServer server(80);
 
 // ESC PWM is driven directly through the ESP32 LEDC peripheral instead of the
@@ -155,6 +157,7 @@ String   cmdBuf = "";
 // ============================================================================
 void IRAM_ATTR rpmISR() {
   uint32_t nowUs = micros();
+  if (nowUs == 0) nowUs = 1;   // 0 is the "no edge yet" sentinel; avoid it at the ~71min micros() wrap
   isrRawEdges++;
 
   if (isrLastRawEdgeUs == 0) {
