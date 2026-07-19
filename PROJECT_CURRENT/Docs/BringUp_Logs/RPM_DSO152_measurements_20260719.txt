@@ -7,7 +7,8 @@
 #  - A1 TP_5V: nguồn 5V ổn (4.94-5.12V), VREF ~2.5V -> nguồn analog OK.
 #  - A2 TP_INA_OUT: sóng sin sau INA826 (Vpp 0.74-1.21V) -> cảm biến + INA OK.
 #  - A3 TP_LMV358_OUT (U1): khi quay ra SÓNG VUÔNG 0.08-3.82V. Do tín hiệu mạnh
-#    nên op-amp LMV358 bão hòa thành sóng vuông -> BÌNH THƯỜNG, không ép về sine.
+#    nên op-amp LM358 (U18) bão hòa thành sóng vuông -> BÌNH THƯỜNG, không ép về sine.
+#    (Lưu ý: IC thực tế là LM358; "LMV358" chỉ là tên net/testpoint trên board.)
 #  - A5 TP_RPM_OUT (U2): sóng vuông sạch sau comparator LMV393.
 #  - GPIO33 SAU KHI SỬA D1: khi quay lên tới ~3.36V sạch (log riêng). Bản đo dưới
 #    còn thể hiện tình trạng CŨ khi D1 lỗi kẹp mức cao chỉ ~1.99-2.06V.

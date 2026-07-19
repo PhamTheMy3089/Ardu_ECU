@@ -208,10 +208,10 @@ KMZ10A (U17, header 4 chân)
         ▼
    C15(10µF) + R35(1M) + R37(4K7) — AC coupling + LPF
         ▼
-   LMV358 U18 Op-Amp 1 ← RP1 100K (OFFSET)
+   LM358 U18 Op-Amp 1 ← RP1 100K (OFFSET)
         ▼
-   LMV358 U18 Op-Amp 2 ← RP2 100K (GAIN)
-        │ LMV358_OUT [TP: U1]
+   LM358 U18 Op-Amp 2 ← RP2 100K (GAIN)
+        │ LMV358_OUT [TP: U1] (tên net/testpoint trên board, IC thực tế là LM358)
         ▼
    R32(10K) + C2(4.7nF LPF)
         ▼
@@ -351,10 +351,10 @@ RP3 tiếp theo sẽ xử lý phần còn lại.
 **A3 — Chỉnh RP1 (Offset) tại U1**
 
 > 🔌 **Nối probe**: que tín hiệu → **U1 (TP_LMV358_OUT)** — testpoint sau
-> 2 tầng op-amp **LMV358 (U18)**, ngay trước comparator; que mát →
+> 2 tầng op-amp **LM358 (U18)**, ngay trước comparator; que mát →
 > **U15 (TP_GND)**. DC coupling.
 
-*RP1 chỉnh gì*: RP1 là trimpot hồi tiếp của tầng LMV358 Op-Amp 1 — nó
+*RP1 chỉnh gì*: RP1 là trimpot hồi tiếp của tầng LM358 Op-Amp 1 — nó
 **dịch mức DC (offset)** của tín hiệu analog lên/xuống, không ảnh hưởng
 biên độ AC. Vặn RP1 tương đương "kéo" cả sóng lên hoặc xuống theo trục
 điện áp, giữ nguyên hình dạng sóng.
@@ -386,7 +386,7 @@ phải **bằng nhau** (sai lệch ≤0.1V là chấp nhận được).
 > 🔌 **Nối probe**: **giữ nguyên** que tín hiệu ở **U1 (TP_LMV358_OUT)** như
 > A3 (que mát vẫn ở U15) — A4 đo cùng điểm với A3, chỉ khác trimpot cần vặn.
 
-*RP2 chỉnh gì*: RP2 là trimpot hồi tiếp của tầng LMV358 Op-Amp 2 — nó
+*RP2 chỉnh gì*: RP2 là trimpot hồi tiếp của tầng LM358 Op-Amp 2 — nó
 **thay đổi hệ số khuếch đại (gain)** của tín hiệu, tức là kéo giãn/co lại
 biên độ dao động AC, không dịch tâm DC (tâm vẫn giữ ở 2.5V nhờ RP1 đã
 chỉnh ở A3).
@@ -416,6 +416,18 @@ RP2 quá thấp (<0.5Vpp):       RP2 tối ưu (1-2Vpp):        RP2 quá cao (cl
 lại A2 (biên độ INA_OUT quá nhỏ, thường do nam châm yếu hoặc lệch hướng
 sensor — không phải do khoảng cách vì khoảng cách cố định) trước khi tiếp
 tục chỉnh RP2.
+
+> ⚠️ **Trần output thực tế của LM358 KHÔNG gần 5V**: IC lắp trên board là
+> **LM358** (không phải LMV358 rail-to-rail như tên net `TP_LMV358_OUT` dễ
+> gây nhầm — xem ghi chú ở đầu tài liệu). Tầng ra LM358 là kiểu cũ
+> (class-AB), **không kéo lên sát V+** được — với VCC≈5V, mức cao thực tế
+> chỉ đạt khoảng **3.1–3.8V** dù RP2 đã vặn hết cỡ. Đây là **giới hạn vật lý
+> của chip**, không phải dấu hiệu chỉnh RP2 sai. Nếu đỉnh sóng dừng ở
+> ~3.1–3.8V nhưng vẫn **bo tròn tự nhiên** (không phẳng cứng) và comparator
+> (bước A5) vẫn ra xung sạch → **không cần cố vặn RP2 để kéo cao hơn**, vô
+> ích và chỉ tăng nguy cơ clipping/double-pulse. Ví dụ "4.5V" trong sơ đồ
+> trên chỉ minh họa khái niệm clipping nói chung, không phải mức điện áp
+> literal đo được trên board này.
 
 **A5 — Chỉnh RP3 (Threshold) tại U2, xác nhận xung RPM_OUT**
 

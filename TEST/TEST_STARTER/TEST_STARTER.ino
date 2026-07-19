@@ -115,8 +115,15 @@ int      pwmUs        = ESC_SAFE_US;   // PWM starter hiện tại (bắt đầu
 int      pwmStepUs    = 10;            // bước +/-
 int      pulsesPerRev = 1;             // xung / vòng
 
-volatile uint32_t rpmMinPulseUs = 120; // bộ lọc glitch phần cứng
+volatile uint32_t rpmMinPulseUs = 120; // bộ lọc glitch phần cứng (khoảng cách 2 RAW edge)
 int      rpmEdgeMode  = RISING;
+
+// Sanity-check cho period giữa 2 xung ĐÃ CHẤP NHẬN (khác với rpmMinPulseUs ở trên,
+// vốn chỉ lọc glitch giữa 2 RAW edge sát nhau). Một xung giả đơn lẻ (comparator
+// rung, GND bounce...) có thể cách xung thật trước đó >120us nhưng vẫn ngắn hơn
+// nhiều so với period thật -> lọt qua rpmMinPulseUs và bị ghi đè vào isrLastPeriodUs,
+// khiến rpm.rpm hiện giá trị RPM ảo cực cao trong đúng 1 chu kỳ in log.
+static const uint32_t MIN_VALID_PERIOD_US = 500; // trần vật lý: ~120000 RPM ở ppr=1
 
 // ---------------- RPM ISR state ----------------
 volatile uint32_t isrLastRawEdgeUs      = 0;
@@ -138,6 +145,7 @@ struct RpmWin {
   float    jitterPct   = 0.0f;   // (maxDt-minDt)/avg * 100
   float    rejectPct   = 0.0f;   // xung bị lọc / xung thô * 100
   uint32_t raw = 0, accepted = 0, rejected = 0, intervals = 0;
+  uint32_t lastPeriodUs = 0;     // period (us) giữa 2 xung chấp nhận gần nhất - để soi log
   bool     signalRecent = false;
   uint32_t lastComputedMs = 0;
 } rpm;
@@ -177,6 +185,16 @@ void IRAM_ATTR rpmISR() {
 
   if (isrLastAcceptedUs != 0) {
     uint32_t dtAcc = nowUs - isrLastAcceptedUs;
+
+    // Loại xung giả: period ngắn bất thường so với trần vật lý, hoặc giảm đột
+    // ngột >50% so với period liền trước (1 xung lạc giữa các xung thật đều đặn).
+    bool implausible = (dtAcc < MIN_VALID_PERIOD_US) ||
+                        (isrLastPeriodUs > 0 && dtAcc < (isrLastPeriodUs >> 1));
+    if (implausible) {
+      isrRejectedEdges++;
+      return;   // KHONG cap nhat isrLastAcceptedUs -> xung gia khong lam lech moc thoi gian
+    }
+
     isrLastPeriodUs = dtAcc;
     isrAcceptedIntervals++;
     isrSumDtUs += dtAcc;
@@ -265,6 +283,7 @@ void updateRpm() {
   interrupts();
 
   rpm.raw = raw; rpm.accepted = accepted; rpm.rejected = rejected; rpm.intervals = intervals;
+  rpm.lastPeriodUs = lastPeriod;
 
   uint32_t nowUs = micros();
   rpm.signalRecent = (lastAcc != 0) && ((uint32_t)(nowUs - lastAcc) <= SIGNAL_TIMEOUT_MS * 1000UL);
@@ -352,6 +371,7 @@ void printStatus() {
   Serial.print(" (win ");  Serial.print(rpm.rpmWindow, 0); Serial.print(")");
   Serial.print(" | raw="); Serial.print(rpm.raw);
   Serial.print(" acc=");   Serial.print(rpm.accepted);
+  Serial.print(" period="); Serial.print(rpm.lastPeriodUs); Serial.print("us");
   Serial.print(" rej=");   Serial.print(rpm.rejected);
   Serial.print(" (");      Serial.print(rpm.rejectPct, 1); Serial.print("%)");
   Serial.print(" | jit="); Serial.print(rpm.jitterPct, 1); Serial.print("%");
@@ -472,6 +492,7 @@ String webStatusJson() {
   s += "\"rpmWindow\":\"" + String(rpm.rpmWindow, 0) + "\",";
   s += "\"raw\":\"" + String(rpm.raw) + "\",";
   s += "\"accepted\":\"" + String(rpm.accepted) + "\",";
+  s += "\"lastPeriodUs\":\"" + String(rpm.lastPeriodUs) + "\",";
   s += "\"rejected\":\"" + String(rpm.rejected) + "\",";
   s += "\"rejectPct\":\"" + String(rpm.rejectPct, 1) + "\",";
   s += "\"jitterPct\":\"" + String(rpm.jitterPct, 1) + "\",";
@@ -513,7 +534,7 @@ PPR <input id="ppr" value="1"><button class="btn" onclick="cmd('ppr '+v('ppr'))"
 </div><script>
 function v(id){return document.getElementById(id).value}
 function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,200))}
-function load(){fetch('/api').then(r=>r.json()).then(d=>{let cards=[['PWM',d.pwm],['RPM',d.rpm],['RPM win',d.rpmWindow],['raw',d.raw],['acc',d.accepted],['rej',d.rejected],['rej%',d.rejectPct],['jit%',d.jitterPct],['cv%',d.cv],['NOISE',d.noise],['STAB',d.stab],['step',d.step],['ppr',d.ppr],['filter',d.filter],['edge',d.edge]];
+function load(){fetch('/api').then(r=>r.json()).then(d=>{let cards=[['PWM',d.pwm],['RPM',d.rpm],['RPM win',d.rpmWindow],['raw',d.raw],['acc',d.accepted],['period us',d.lastPeriodUs],['rej',d.rejected],['rej%',d.rejectPct],['jit%',d.jitterPct],['cv%',d.cv],['NOISE',d.noise],['STAB',d.stab],['step',d.step],['ppr',d.ppr],['filter',d.filter],['edge',d.edge]];
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');});}
 setInterval(load,700);load();
 </script></body></html>

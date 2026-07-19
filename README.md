@@ -92,7 +92,7 @@ URL:  http://192.168.4.1
 | Status LED | Digital | 2 (active LOW) |
 | MicroSD (SPI) | SPI | CS=13, SCK=14, MOSI=23, MISO=27 |
 
-**Mạch cảm biến RPM**: KMZ10A → INA826 (gain ×38) → LMV358 (op-amp trim) → LMV393 (comparator Schmitt) → GPIO33  
+**Mạch cảm biến RPM**: KMZ10A → INA826 (gain ×38) → LM358 (op-amp trim) → LMV393 (comparator Schmitt) → GPIO33  
 Ba trimpot: RP1 (offset), RP2 (gain), RP3 (threshold). Xem `Docs/COMMISSIONING_GUIDE.md` (Giai đoạn 2).
 
 ---
