@@ -1,0 +1,104 @@
+# Log bench-test cảm biến RPM bằng firmware TEST_STARTER - RUN 2 (2026-07-19)
+#
+# Bối cảnh: quét PWM rộng hơn (1150 -> 1300us) sau khi đã sửa D1. ppr=1,
+# filter=120us, edge=RISING, step=10us. Có cả đoạn coast-down (tắt starter).
+#
+# ==== KẾT LUẬN QUAN TRỌNG (chốt chẩn đoán) ====
+#  1) RPM ghim ĐÚNG 1500 (raw=3/cửa sổ) suốt dải PWM 1150->1300us, KHÔNG đổi
+#     dù mắt thấy động cơ quay nhanh hơn hẳn ở PWM cao. => Tần số xung bị khóa
+#     cứng ~25Hz, KHÔNG bám theo tốc độ quay thật.
+#  2) Nhưng khi TẮT starter (ESC OFF), rotor trôi chậm dần thì RPM GIẢM đều
+#     thật: 1500 -> 750 -> 500 -> 375 -> 250 -> ... -> 0. Tức là khi ESC tắt,
+#     cảm biến ĐỌC ĐÚNG tín hiệu magnet.
+#  => Chỉ khi ESC/motor CHẠY thì reading mới bị khóa 1500; khi ESC tắt đọc đúng.
+#     Đây là dấu hiệu kinh điển của NHIỄU EMI TỪ MOTOR/ESC lọt vào đường tín
+#     hiệu RPM (~25Hz) lấn át tín hiệu magnet. Các số nhảy vọt 94k/106k/240k/
+#     365k RPM là glitch xung đôi tức thời cùng nguồn nhiễu.
+#  => KHÔNG phải lỗi firmware, KHÔNG phải bão hòa nam châm.
+#
+# HƯỚNG XỬ LÝ (ưu tiên):
+#  1. Nối đất chung kiểu star ground (12V starter / UBEC 6V / mạch ECU).
+#  2. Bọc shield + tách xa dây RPM khỏi dây motor/ESC; xoắn đôi RPM_OUT+GND.
+#  3. Lắp lại D1 (TVS 3.3V đúng loại) + cân nhắc thêm tụ lọc nhỏ tại GPIO33.
+#  4. Kiểm chứng: DSO tại U2/GPIO33 khi motor chạy -> nếu vẫn ~25Hz cứng = EMI.
+#
+# Ghi chú: khối ~200 dòng "NO_SIGNAL STAB=OFF" lúc chờ ở đầu đã được lược bớt
+# (thay bằng dấu [...]); phần dữ liệu có ý nghĩa được giữ nguyên.
+# ------------------------------------------------------------------------------
+
+PWM=1000us(OFF) | RPM=500 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=32.1% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=375 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=24.0% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=375 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=25.3% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=250 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=23.8% | NOISE=CLEAN STAB=OFF
+
+--- REBOOT ---
+ets Jul 29 2019 12:21:46
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+
+TEST_STARTER booted. Starter DISARMED at 1000us (khong quay).
+  hien tai: step=10us ppr=1 filter=120us edge=RISING
+
+ESC armed. San sang test.
+PWM=1000us(OFF) | RPM=83 (win 223) | raw=10 acc=9 rej=0 (0.0%) | jit=390.0% cv=-- | NOISE=NOISY STAB=OFF
+PWM=1000us(OFF) | RPM=83 (win 0) | raw=0 acc=0 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=0 (win 0) | raw=0 acc=0 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=NO_SIGNAL STAB=OFF
+
+[... nhiều dòng NO_SIGNAL/SETTLING trong lúc tăng PWM 1010->1140us, RPM=0 ...]
+
+PWM=1150us (+)
+PWM=1150us | RPM=4 (win 0) | raw=0 acc=0 rej=0 (0.0%) | jit=0.0% cv=-- | NOISE=CLEAN STAB=SETTLING
+PWM=1150us | RPM=100 (win 0) | raw=0 acc=0 rej=0 (0.0%) | jit=0.0% cv=139.0% | NOISE=CLEAN STAB=SETTLING
+PWM=1160us (+)
+PWM=1160us | RPM=250 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=39.1% | NOISE=CLEAN STAB=SETTLING
+PWM=1160us | RPM=500 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=51.2% | NOISE=CLEAN STAB=SETTLING
+PWM=1170us (+)
+PWM=1170us | RPM=750 (win 750) | raw=2 acc=2 rej=0 (0.0%) | jit=40.0% cv=-- | NOISE=WARN STAB=SETTLING
+PWM=1170us | RPM=1500 (win 1000) | raw=2 acc=2 rej=0 (0.0%) | jit=66.7% cv=37.8% | NOISE=NOISY STAB=SETTLING
+PWM=1180us (+)
+PWM=1180us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=21.2% | NOISE=CLEAN STAB=SETTLING
+PWM=1190us (+)
+PWM=1190us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=CLEAN STAB=STABLE
+PWM=1200us (+)
+PWM=1200us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=CLEAN STAB=STABLE
+PWM=1210us (+)
+PWM=1210us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=CLEAN STAB=STABLE
+PWM=1220us (+)
+PWM=1220us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=CLEAN STAB=STABLE
+PWM=1230us (+)
+PWM=1230us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=320.2% | NOISE=CLEAN STAB=UNSTABLE
+PWM=1240us (+)
+PWM=1240us | RPM=1500 (win 1500) | raw=4 acc=3 rej=1 (25.0%) | jit=0.0% cv=0.0% | NOISE=NOISY STAB=SETTLING
+PWM=1240us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=CLEAN STAB=STABLE
+PWM=1250us (+)
+PWM=1250us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=CLEAN STAB=STABLE
+PWM=1250us | RPM=106952 (win 2000) | raw=4 acc=4 rej=0 (0.0%) | jit=130.9% cv=315.3% | NOISE=NOISY STAB=UNSTABLE
+PWM=1250us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=315.3% | NOISE=CLEAN STAB=UNSTABLE
+PWM=1260us (+)
+PWM=1260us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=CLEAN STAB=STABLE
+PWM=1270us (+)
+PWM=1270us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.3% | NOISE=CLEAN STAB=STABLE
+PWM=1270us | RPM=365854 (win 2000) | raw=4 acc=4 rej=0 (0.0%) | jit=132.6% cv=363.3% | NOISE=NOISY STAB=UNSTABLE
+PWM=1280us (+)
+PWM=1280us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.3% | NOISE=CLEAN STAB=STABLE
+PWM=1290us (+)
+PWM=1290us | RPM=260870 (win 2000) | raw=4 acc=4 rej=0 (0.0%) | jit=132.3% cv=194.4% | NOISE=NOISY STAB=SETTLING
+PWM=1290us | RPM=1507 (win 2000) | raw=4 acc=4 rej=0 (0.0%) | jit=132.8% cv=257.2% | NOISE=NOISY STAB=UNSTABLE
+PWM=1300us (+)
+PWM=1300us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.0% | NOISE=CLEAN STAB=STABLE
+PWM=1300us | RPM=240964 (win 2000) | raw=4 acc=4 rej=0 (0.0%) | jit=132.2% cv=352.0% | NOISE=NOISY STAB=UNSTABLE
+PWM=1300us | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=336.7% | NOISE=CLEAN STAB=UNSTABLE
+
+STARTER OFF (PWM=1000us).
+# --- COAST-DOWN: ESC tắt, rotor trôi chậm dần -> RPM giảm THẬT (đọc đúng magnet) ---
+PWM=1000us(OFF) | RPM=1500 (win 1500) | raw=4 acc=4 rej=0 (0.0%) | jit=0.0% cv=-- | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=1500 (win 1500) | raw=3 acc=3 rej=0 (0.0%) | jit=0.0% cv=0.1% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=750 (win 1000) | raw=2 acc=2 rej=0 (0.0%) | jit=66.7% cv=12.5% | NOISE=NOISY STAB=OFF
+PWM=1000us(OFF) | RPM=750 (win 1000) | raw=2 acc=2 rej=0 (0.0%) | jit=0.0% cv=32.9% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=500 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=19.4% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=375 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=22.7% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=300 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=21.5% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=250 (win 500) | raw=1 acc=1 rej=0 (0.0%) | jit=0.0% cv=23.9% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=188 (win 0) | raw=0 acc=0 rej=0 (0.0%) | jit=0.0% cv=21.8% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=136 (win 0) | raw=0 acc=0 rej=0 (0.0%) | jit=0.0% cv=24.5% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=94 (win 0) | raw=0 acc=0 rej=0 (0.0%) | jit=0.0% cv=22.9% | NOISE=CLEAN STAB=OFF
+PWM=1000us(OFF) | RPM=0 (win 0) | raw=0 acc=0 rej=0 (0.0%) | jit=0.0% cv=20.4% | NOISE=NO_SIGNAL STAB=OFF
