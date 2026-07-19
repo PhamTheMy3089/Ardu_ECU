@@ -1,0 +1,53 @@
+# Đo DSO152 từng tầng mạch cảm biến RPM (KMZ10A) - 2026-07-19
+#
+# Đo trong quá trình bring-up mạch RPM. GND probe kẹp tại TP_GND (U15).
+# Rotor quay chậm bằng tay/gió. Các giá trị dưới là số đọc thực từ DSO152.
+#
+# Diễn giải nhanh:
+#  - A1 TP_5V: nguồn 5V ổn (4.94-5.12V), VREF ~2.5V -> nguồn analog OK.
+#  - A2 TP_INA_OUT: sóng sin sau INA826 (Vpp 0.74-1.21V) -> cảm biến + INA OK.
+#  - A3 TP_LMV358_OUT (U1): khi quay ra SÓNG VUÔNG 0.08-3.82V. Do tín hiệu mạnh
+#    nên op-amp LMV358 bão hòa thành sóng vuông -> BÌNH THƯỜNG, không ép về sine.
+#  - A5 TP_RPM_OUT (U2): sóng vuông sạch sau comparator LMV393.
+#  - GPIO33 SAU KHI SỬA D1: khi quay lên tới ~3.36V sạch (log riêng). Bản đo dưới
+#    còn thể hiện tình trạng CŨ khi D1 lỗi kẹp mức cao chỉ ~1.99-2.06V.
+# ------------------------------------------------------------------------------
+
+A1./ TP_5V (U16): 4.94v -> 5.12v
+A2./ TP_INA_OUT:  Khi quay đo AC 500mv, 200ms Vmax 0.33V, Vmin 0.41V,vrms 0.03V, VPP 0.74V,cyc 8 ms tạo song hình sin với
+VREF 2.47v -> 2.53v
+
+đo AC 500mv, 5ms Vmax 0.59V, Vmin 0.62V, Vave 0.05V,vrms 0.45V, VPP 1.21V,cyc 0.2 ms tạo song hình sin
+
+
+A3./ Probe tại TP_LMV358_OUT (U1) chỉnh  DC	1V	5ms
+
+TP_LMV358_OUT
+- khi chưa quay vmin 2.05, vmax 3.15 sóng nhiễu
+- Khi quay 	vmin 0.08, vmax 3.82, Vave 1.59V, Vrms 2.46, Vpp 3.74V, fre 0.033khz, dut 42.5%, cyc 28.2ms Sóng vuôn
+
+A5./ Probe tại TP_RPM_OUT (U2) chỉnh  DC	1V	5ms
+Khi quay vmin 0.07V, vmax 2.08V, Vave 0.88V, Vrms 1.35V, Vpp 2.01V, fre 0.036khz, dut 44.1%, cyc 27.2ms Sóng vuôn
+
+ Probe tại GPIO33  chỉnh  DC	1V	5ms
+- khi chưa quay vmin 1.84V, vmax 1.99V , Vave 1.88V, Vrms 1.9V, Vpp 0.07V, fre 0.0khz, dut 0%, cyc 0.2ms
+
+- Khi quay 	vmin 0.07V, vmax 1.99V, Vave 0.81V, Vrms 1.26V, Vpp 1.92V, fre 0.032khz, dut 44%, cyc 26.8ms Sóng vuôn
+
+
+TP_LMV358_OUT AC Min
+
+TP_LMV358_OUT
+khi quay Vmax 3.82 Vmin 0.46
+Khi dung yen Vmax 2.68 Vmin 2.45
+
+3.82
+2.61
+
+# ------------------------------------------------------------------------------
+# GHI CHÚ QUAN TRỌNG (sau khi sửa D1):
+# GPIO33 mức cao chỉ ~1.99-2.06V ở trên là do D1 (TVS clamp) SAI/HỎNG kẹp tín hiệu
+# xuống dưới ngưỡng VIH của ESP32 (~2.475V) -> ESP32 không đọc được cạnh xung.
+# Sau khi THÁO D1: GPIO33 khi quay lên 3.36V sạch (Vpp 3.29V, dut 44%, sóng vuông).
+# => Cần lắp lại D1 bằng TVS 3.3V ĐÚNG LOẠI trước khi chạy động cơ thật (bảo vệ
+#    ESD/transient). Bench test tạm thời không có D1 thì chấp nhận được.
