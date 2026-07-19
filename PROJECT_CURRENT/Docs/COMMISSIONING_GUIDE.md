@@ -208,10 +208,10 @@ KMZ10A (U17, header 4 chân)
         ▼
    C15(10µF) + R35(1M) + R37(4K7) — AC coupling + LPF
         ▼
-   LMV358 U18 Op-Amp 1 ← RP1 100K (OFFSET)
+   LM358 U18 Op-Amp 1 ← RP1 100K (OFFSET)
         ▼
-   LMV358 U18 Op-Amp 2 ← RP2 100K (GAIN)
-        │ LMV358_OUT [TP: U1]
+   LM358 U18 Op-Amp 2 ← RP2 100K (GAIN)
+        │ LMV358_OUT [TP: U1] (tên net/testpoint trên board, IC thực tế là LM358)
         ▼
    R32(10K) + C2(4.7nF LPF)
         ▼
@@ -351,10 +351,10 @@ RP3 tiếp theo sẽ xử lý phần còn lại.
 **A3 — Chỉnh RP1 (Offset) tại U1**
 
 > 🔌 **Nối probe**: que tín hiệu → **U1 (TP_LMV358_OUT)** — testpoint sau
-> 2 tầng op-amp **LMV358 (U18)**, ngay trước comparator; que mát →
+> 2 tầng op-amp **LM358 (U18)**, ngay trước comparator; que mát →
 > **U15 (TP_GND)**. DC coupling.
 
-*RP1 chỉnh gì*: RP1 là trimpot hồi tiếp của tầng LMV358 Op-Amp 1 — nó
+*RP1 chỉnh gì*: RP1 là trimpot hồi tiếp của tầng LM358 Op-Amp 1 — nó
 **dịch mức DC (offset)** của tín hiệu analog lên/xuống, không ảnh hưởng
 biên độ AC. Vặn RP1 tương đương "kéo" cả sóng lên hoặc xuống theo trục
 điện áp, giữ nguyên hình dạng sóng.
@@ -386,7 +386,7 @@ phải **bằng nhau** (sai lệch ≤0.1V là chấp nhận được).
 > 🔌 **Nối probe**: **giữ nguyên** que tín hiệu ở **U1 (TP_LMV358_OUT)** như
 > A3 (que mát vẫn ở U15) — A4 đo cùng điểm với A3, chỉ khác trimpot cần vặn.
 
-*RP2 chỉnh gì*: RP2 là trimpot hồi tiếp của tầng LMV358 Op-Amp 2 — nó
+*RP2 chỉnh gì*: RP2 là trimpot hồi tiếp của tầng LM358 Op-Amp 2 — nó
 **thay đổi hệ số khuếch đại (gain)** của tín hiệu, tức là kéo giãn/co lại
 biên độ dao động AC, không dịch tâm DC (tâm vẫn giữ ở 2.5V nhờ RP1 đã
 chỉnh ở A3).

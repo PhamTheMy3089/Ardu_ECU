@@ -18,7 +18,7 @@ Thư mục lưu các log/đo đạc thực tế trong quá trình đưa mạch v
   → **nhiễu EMI từ motor/ESC** lấn át tín hiệu RPM, KHÔNG phải lỗi firmware/nam châm.
   Xử lý: **star ground**, bọc shield + tách xa dây RPM khỏi dây motor, lắp lại D1,
   thêm lọc tại GPIO33.
-- **LMV358 (U1) bão hòa thành sóng vuông là bình thường** (tín hiệu mạnh) — đừng ép về sine.
+- **LM358 (U18, ra tại testpoint U1/TP_LMV358_OUT) bão hòa thành sóng vuông là bình thường** (tín hiệu mạnh) — đừng ép về sine.
 - **RP1/RP2/RP3 là trimpot 3296 25 vòng** — phải vặn nhiều vòng mới thấy đổi; RP3 đổi
   duty/độ sạch xung chứ không đổi mức cao.
 
