@@ -19,6 +19,11 @@ Thư mục lưu các log/đo đạc thực tế trong quá trình đưa mạch v
   Xử lý: **star ground**, bọc shield + tách xa dây RPM khỏi dây motor, lắp lại D1,
   thêm lọc tại GPIO33.
 - **LM358 (U18, ra tại testpoint U1/TP_LMV358_OUT) bão hòa thành sóng vuông là bình thường** (tín hiệu mạnh) — đừng ép về sine.
+- **Trần output U1 chỉ ~3.1–3.8V dù VCC≈5V, KHÔNG phải lỗi RP2**: IC thực tế là
+  **LM358** (tầng ra class-AB, không rail-to-rail), không kéo lên sát V+ được —
+  khác với LMV358 (rail-to-rail output) mà tên net `TP_LMV358_OUT` dễ gây nhầm.
+  Nếu đỉnh sóng vẫn bo tròn tự nhiên và comparator ra xung sạch, đừng cố vặn RP2
+  để kéo cao hơn 3.8V.
 - **RP1/RP2/RP3 là trimpot 3296 25 vòng** — phải vặn nhiều vòng mới thấy đổi; RP3 đổi
   duty/độ sạch xung chứ không đổi mức cao.
 
