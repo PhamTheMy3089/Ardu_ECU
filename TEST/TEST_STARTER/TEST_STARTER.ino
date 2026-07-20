@@ -323,8 +323,13 @@ void updateRpm() {
 const char* noiseVerdict() {
   if (!rpm.signalRecent && rpm.raw == 0) return "NO_SIGNAL";
   if (rpm.raw > 0 && rpm.accepted == 0)  return "NOISY";       // toàn xung rác bị lọc
-  if (rpm.rejectPct > 20.0f || rpm.jitterPct > 40.0f) return "NOISY";
-  if (rpm.rejectPct > 5.0f  || rpm.jitterPct > 15.0f) return "WARN";
+  // Ngay sau khi đổi PWM (SETTLING), period đang thay đổi thật (tăng/giảm ga)
+  // nên jitterPct tự nhiên rất cao dù không có xung giả nào - đây là quán tính
+  // cơ khí thật, không phải nhiễu điện. Chỉ dùng jitterPct để kết luận NOISY/WARN
+  // khi đã hết thời gian settle; rejectPct (xung bị loại thật sự) vẫn luôn tính.
+  bool settling = (millis() - pwmChangedAtMs < SETTLE_MS);
+  if (rpm.rejectPct > 20.0f || (!settling && rpm.jitterPct > 40.0f)) return "NOISY";
+  if (rpm.rejectPct > 5.0f  || (!settling && rpm.jitterPct > 15.0f)) return "WARN";
   return "CLEAN";
 }
 
