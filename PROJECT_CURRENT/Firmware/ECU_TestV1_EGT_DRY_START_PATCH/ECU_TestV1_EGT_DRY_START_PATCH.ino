@@ -536,8 +536,16 @@ int usFromFlow(float mlMin) {
 void applyOutputs() {
   pumpUs = constrain(pumpUs, ESC_MIN_US, ESC_MAX_US);
   startUs = constrain(startUs, ESC_MIN_US, ESC_MAX_US);
-  escWriteUs(PIN_ESC_PUMP, LEDC_CH_PUMP, pumpUs);
-  escWriteUs(PIN_ESC_START, LEDC_CH_START, startUs);
+  // Chi goi ledcWrite() khi gia tri thuc su doi. applyOutputs() duoc goi moi
+  // vong loop(), va ledcWrite() lap lai khong can thiet (gia tri khong doi)
+  // co the chiem CPU/critical-section toi muc anh huong ISR dem xung RPM -
+  // da xac nhan bang TEST_RPM_RAWCOUNT.ino (trần cứng RAW_EDGES/s bien mat
+  // sau khi bo goi lai khong can thiet nay). escAttach() chi goi 1 lan trong
+  // setup() nen cache nay khong bi lech so voi trang thai LEDC thuc te.
+  static int lastPumpUs = -1;
+  static int lastStartUs = -1;
+  if (pumpUs != lastPumpUs) { escWriteUs(PIN_ESC_PUMP, LEDC_CH_PUMP, pumpUs); lastPumpUs = pumpUs; }
+  if (startUs != lastStartUs) { escWriteUs(PIN_ESC_START, LEDC_CH_START, startUs); lastStartUs = startUs; }
   writeActiveDigital(PIN_IGN, ignCmd, IGN_ACTIVE_HIGH);
   writeActiveDigital(PIN_VALVE_1, valve1Cmd, VALVE_ACTIVE_HIGH);
   writeActiveDigital(PIN_VALVE_2, valve2Cmd, VALVE_ACTIVE_HIGH);
