@@ -11,6 +11,15 @@
 > Tài liệu này gộp toàn bộ các hướng dẫn trước đây
 > (Upload & Test, Pre-Engine Test, DSO152 RPM Calibration, Commissioning)
 > thành **1 file duy nhất** để không phải lật qua nhiều tài liệu.
+>
+> **Điều khiển & test hoàn toàn qua Web UI (không cần terminal).** Kể từ bản
+> hiện tại, mọi thao tác điều khiển, Test Wizard, manual test (starter / pump /
+> glow / valve) và toàn bộ tham số tune (RPM, PWM, EGT, timing, cooldown,
+> interlock) đều có nút/ô nhập trên giao diện web `http://192.168.4.1`
+> (SoftAP `ECU_TestV1` / `admin1234`). Các lệnh Serial vẫn còn hoạt động như
+> phương án dự phòng, nhưng không bắt buộc dùng — mỗi ví dụ lệnh Serial dưới
+> đây đều có nút tương ứng trên web. Phần tune nâng cao (timing/cooldown/
+> interlock) nằm trong mục **"Advanced"** có thể mở/gập trên web.
 
 ---
 
