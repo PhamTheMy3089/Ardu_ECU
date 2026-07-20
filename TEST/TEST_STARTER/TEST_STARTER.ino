@@ -587,7 +587,12 @@ void loop() {
   handleSerial();
   server.handleClient();
   updateRpm();
-  applyPwm();   // keep the starter ESC signal refreshed each loop
+  // KHONG goi applyPwm()/ledcWrite() moi vong lap: LEDC la PWM phan cung,
+  // tu phat song doc lap sau khi ledcWrite() duoc goi 1 lan (khac ESP32Servo,
+  // vi vay khong can "refresh" lien tuc). Goi lai khong can thiet moi vong
+  // lap co the chiem CPU/critical-section va nghi ngo la nguyen nhan gay
+  // tran cung ~25 xung/s quan sat duoc trong TEST_RPM_RAWCOUNT khi doi chieu
+  // voi DSO152. setPwm() da goi applyPwm() moi khi gia tri PWM thuc su doi.
 
   uint32_t nowMs = millis();
   if (nowMs - lastStatusMs >= STATUS_PRINT_MS) {

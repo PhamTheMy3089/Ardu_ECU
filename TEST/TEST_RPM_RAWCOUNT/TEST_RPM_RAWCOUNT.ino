@@ -126,7 +126,12 @@ uint32_t lastPrintMs = 0;
 
 void loop() {
   handleSerial();
-  applyPwm();   // giu tin hieu ESC lien tuc
+  // KHONG goi applyPwm()/ledcWrite() moi vong lap: LEDC la PWM phan cung,
+  // tu phat song doc lap sau khi ledcWrite() duoc goi 1 lan (khac ESP32Servo).
+  // Goi lai lien tuc khong can thiet va co the chiem dung CPU/critical-section,
+  // nghi ngo la nguyen nhan gay tran cung ~25 xung/s quan sat duoc khi doi
+  // chieu voi DSO152 (RAW_EDGES/s bi ghim trong khi Fre do duoc van tang).
+  // setPwm() da goi applyPwm() moi khi gia tri PWM thuc su doi.
 
   uint32_t nowMs = millis();
   if (nowMs - lastPrintMs >= 1000) {
