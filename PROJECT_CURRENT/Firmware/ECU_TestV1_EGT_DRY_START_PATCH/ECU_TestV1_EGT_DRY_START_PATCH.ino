@@ -134,6 +134,13 @@ static const uint32_t EGT_STUCK_WARN_MS = 6000;  // warn (log only) if EGT reads
 static const uint32_t STATUS_PRINT_MS = 250;
 static const uint32_t STAGE2_ARM_TIME_MS = 10000;
 static const uint32_t STARTER_PROVE_TIMEOUT_MS = 1500;
+// Test Wizard starter spin duration. 3s was too short: from a standing start the
+// motor is still accelerating at the end of the window, so per-window jitter stays
+// high and the RPM verdict false-flags NOISY before the speed has settled. 5s lets
+// the motor reach a steady RPM so the final sample window reads CLEAN (matches the
+// bench TEST_STARTER.ino observation that a fixed PWM settles within ~1-1.5s/step
+// but a full spin-up from OFF takes noticeably longer).
+static const uint32_t STARTER_TEST_SPIN_MS = 5000;
 static const uint32_t VALVE_TEST_TIMEOUT_MS = 10000;  // bench valve1/valve2 "on" auto-off window
 // Faster RPM-loss detection while fueled at running RPM (IDLING/OPERATING), so fuel
 // is cut promptly after a real flameout instead of waiting the full 1s signal timeout.
@@ -1487,14 +1494,14 @@ void runTestByName(const String& nameIn) {
       resetRpmStats();
       startUs = cfg.starterSpinUs;
       applyOutputs();
-      startTimedTest(id, 3000);
+      startTimedTest(id, STARTER_TEST_SPIN_MS);
       break;
     case TEST_STARTER_IGN:
       resetRpmStats();
       startUs = cfg.starterSpinUs;
       ignCmd = true;
       applyOutputs();
-      startTimedTest(id, 3000);
+      startTimedTest(id, STARTER_TEST_SPIN_MS);
       break;
     case TEST_VALVE1:
       valve1Cmd = true;
@@ -1541,25 +1548,37 @@ void updateActiveTest() {
       applyOutputs();
       setChecklist(done, TEST_PASS, "IGN pulse completed");
       break;
-    case TEST_STARTER:
+    case TEST_STARTER: {
+      // Read RPM/noise WHILE the starter is still spinning. Stopping it first would
+      // satisfy rpmAtRestGuardCondition() (WAITING + startStage==ST_NONE + startUs
+      // back at SAFE), which forces rpmData.rpm=0 / RPM_REST_NOISE - that made the
+      // verdict read RPM=0 the instant the starter stopped.
+      updateRpm();
+      bool ok = rpmMeasurementUsable() && rpmData.rpm >= cfg.starterProveMinRpm;
+      float capturedRpm = rpmData.rpm;
+      RpmNoiseLevel capturedNoise = rpmData.noise;
       startUs = ESC_SAFE_US;
       applyOutputs();
-      updateRpm();
-      if (rpmMeasurementUsable() && rpmData.rpm >= cfg.starterProveMinRpm)
-        setChecklist(done, TEST_PASS, String("RPM=") + String(rpmData.rpm, 0) + " RNOISE=" + rpmNoiseName(rpmData.noise));
+      if (ok)
+        setChecklist(done, TEST_PASS, String("RPM=") + String(capturedRpm, 0) + " RNOISE=" + rpmNoiseName(capturedNoise));
       else
-        setChecklist(done, TEST_FAIL, String("RPM/RNOISE bad: RPM=") + String(rpmData.rpm, 0) + " RNOISE=" + rpmNoiseName(rpmData.noise));
+        setChecklist(done, TEST_FAIL, String("RPM/RNOISE bad: RPM=") + String(capturedRpm, 0) + " RNOISE=" + rpmNoiseName(capturedNoise));
       break;
-    case TEST_STARTER_IGN:
+    }
+    case TEST_STARTER_IGN: {
+      // Same as TEST_STARTER: capture the noise verdict while spinning, before the
+      // rest-guard zeroes it.
+      updateRpm();
+      RpmNoiseLevel capturedNoise = rpmData.noise;
       startUs = ESC_SAFE_US;
       ignCmd = false;
       applyOutputs();
-      updateRpm();
-      if (rpmData.noise == RPM_NO_SIGNAL || rpmData.noise == RPM_CLEAN)
-        setChecklist(done, TEST_PASS, String("EMI OK RNOISE=") + rpmNoiseName(rpmData.noise));
+      if (capturedNoise == RPM_NO_SIGNAL || capturedNoise == RPM_CLEAN)
+        setChecklist(done, TEST_PASS, String("EMI OK RNOISE=") + rpmNoiseName(capturedNoise));
       else
-        setChecklist(done, TEST_FAIL, String("EMI/RPM noisy RNOISE=") + rpmNoiseName(rpmData.noise));
+        setChecklist(done, TEST_FAIL, String("EMI/RPM noisy RNOISE=") + rpmNoiseName(capturedNoise));
       break;
+    }
     case TEST_VALVE1:
       valve1Cmd = false;
       applyOutputs();
@@ -2120,7 +2139,7 @@ void printHelp() {
   Serial.println("autostart on/off      -> enable/disable auto-idle runtime");
   Serial.println("ignpulse 500..3000    -> glow ON ms then auto OFF");
   Serial.println("starttest us ms       -> starter test, e.g. starttest 1100 3000");
-  Serial.println("pumptest us [ms]      -> bench pump verify only, auto-off default 1500ms, max 5000ms");
+  Serial.println("pumptest us [ms]      -> bench pump verify only, auto-off after ms (default 1500ms, no cap)");
   Serial.println("valve1 on/off (Start solenoid, bench-only) | valve2 on/off (Main oil valve, bench-only)");
   Serial.println("startidle             -> guarded auto-idle start sequence");
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
@@ -2292,8 +2311,10 @@ void handleCommand(String cmd) {
     if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; }
     if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: starttest only while WAITING/ABORTED."); return; }
     int us; uint32_t ms; if (!parseTwoInts(cmd, us, ms)) { Serial.println("ERROR: use starttest <us> <ms>"); return; }
-    if (us < 1000 || us > 1300 || ms < 500 || ms > 10000) { Serial.println("ERROR: us 1000..1300, ms 500..10000"); return; }
-    startUs = us; manualStartOffAtMs = millis() + ms; applyOutputs(); Serial.println("STARTER TEST RUNNING"); return;
+    // Duration is not capped: bench manual test runs exactly the ms the user enters.
+    // (us still bounded for ESC safety.) Stop early anytime with 'off'/'stop'.
+    if (us < 1000 || us > 1300) { Serial.println("ERROR: us 1000..1300"); return; }
+    startUs = us; manualStartOffAtMs = millis() + ms; applyOutputs(); Serial.print("STARTER TEST RUNNING for "); Serial.print(ms); Serial.println(" ms"); return;
   }
 
   if (cmd.startsWith("pumptest ")) {
@@ -2306,8 +2327,9 @@ void handleCommand(String cmd) {
     int us = (sp < 0) ? args.toInt() : args.substring(0, sp).toInt();
     uint32_t ms = (sp < 0) ? 1500UL : (uint32_t)args.substring(sp + 1).toInt();
 
+    // Duration is not capped: bench manual pump test runs exactly the ms the user
+    // enters. (us still bounded for ESC safety.) Stop early anytime with 'off'/'stop'.
     if (us < 1000 || us > 1225) { Serial.println("ERROR: bench pumptest limited 1000..1225 us"); return; }
-    if (ms < 200 || ms > 5000) { Serial.println("ERROR: pumptest ms 200..5000"); return; }
     if (fuelCommandBlockedByHotEgt()) {
       Serial.print("PUMPTEST BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
       Serial.print("C > cooldown target "); Serial.print(cfg.cooldownTargetC);

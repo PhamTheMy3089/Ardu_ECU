@@ -588,7 +588,9 @@ sau khi arm).
 arm2
 test ign          -> glow plug bật 1s, quan sát dòng điện/nhiệt bằng tay (cẩn thận nóng)
 arm2
-test starter      -> starter quay 3s ở us cấu hình, xem RPM có tăng lên không
+test starter      -> starter quay 5s ở us cấu hình, xem RPM có tăng lên không
+                     (RPM/RNOISE được chốt LÚC starter còn quay, ngay trước khi tắt —
+                      tránh rest-guard ép RPM=0; 5s đủ để tốc độ ổn định, hết báo NOISY)
 arm2
 test starter_ign  -> starter + glow cùng lúc, kiểm tra EMI có làm nhiễu RPM không (resetRpmStats() trước bước này đã fix trong CODE_REVIEW_FINDINGS.md)
 arm2
@@ -625,7 +627,8 @@ arm2
 pumptest 1160 1500   -> bơm chạy 1500ms ở 1160us, đo ml thực tế đối chiếu bảng calib
 ```
 
-> Trần bench `pumptest` hiện là **1000..1225µs**. Nút "Pump prime" trên Web UI
+> Trần bench `pumptest` hiện là **1000..1225µs** (thời lượng `ms` **không giới hạn**
+> — nhập bao nhiêu chạy bấy nhiêu, tự tắt sau `ms`; `starttest` cũng vậy). Nút "Pump prime" trên Web UI
 > chạy ở `pumpTestUs` = **1160µs** (mặc định) — mức flow **thấp nhất đã đo thực
 > tế** (50 ml/phút), an toàn hơn cho bench test. Vẫn nên quét vài mức us khác
 > để xác nhận độ tuyến tính (dùng panel **"Pump Manual Test"** trên Web UI,
