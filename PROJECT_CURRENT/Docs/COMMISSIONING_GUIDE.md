@@ -17,9 +17,25 @@
 > glow / valve) và toàn bộ tham số tune (RPM, PWM, EGT, timing, cooldown,
 > interlock) đều có nút/ô nhập trên giao diện web `http://192.168.4.1`
 > (SoftAP `ECU_TestV1` / `admin1234`). Các lệnh Serial vẫn còn hoạt động như
-> phương án dự phòng, nhưng không bắt buộc dùng — mỗi ví dụ lệnh Serial dưới
-> đây đều có nút tương ứng trên web. Phần tune nâng cao (timing/cooldown/
-> interlock) nằm trong mục **"Advanced"** có thể mở/gập trên web.
+> phương án dự phòng, nhưng không bắt buộc dùng.
+>
+> Giao diện web chia **3 tab**:
+> - **▶ Run** — điều khiển (ARM / START IDLE / AutoStart / SOFT STOP / SAFE OFF /
+>   CLEAR ABORT / RPM RESET), chế độ EGT, và các thẻ trạng thái chi tiết.
+> - **🧪 Testing** — Test Wizard (9 bước + checklist) và Manual Actuator Test
+>   (starter / pump / glow / valve1 / valve2).
+> - **⚙ Settings** — toàn bộ tham số tune + lưu/nạp config, mục **"Advanced"**
+>   (timing/cooldown/interlock) mở/gập được.
+>
+> Phía trên luôn hiển thị **2 đồng hồ (gauge) RPM & EGT** và dải chip trạng thái
+> (MODE / STAGE / ARM / AUTO / NOISE / CHECK / ABORT) đổi màu theo trạng thái.
+>
+> **Lưu config vào thẻ SD (cấu hình 1 lần):** trong tab **Settings**, bấm
+> **"💾 Lưu config vào SD"** để ghi toàn bộ tham số tune ra `/ECUCFG.TXT`. Lần
+> sau bật máy, firmware **tự nạp lại** file này lúc boot (mọi giá trị được kẹp
+> trong khoảng hợp lệ khi nạp). Nút **"↻ Nạp lại từ SD"** nạp lại ngay không cần
+> khởi động lại. Vì an toàn, `autoStart`, throttle và web KHÔNG được lưu — luôn
+> khởi động ở trạng thái an toàn. (Lệnh Serial tương đương: `savecfg` / `loadcfg`.)
 
 ---
 
