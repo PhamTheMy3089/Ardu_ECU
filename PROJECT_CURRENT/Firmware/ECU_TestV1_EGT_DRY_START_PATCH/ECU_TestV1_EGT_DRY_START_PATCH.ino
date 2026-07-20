@@ -386,6 +386,10 @@ bool webStarted = false;
 // ===== SD logging =====
 SPIClass sdSPI(VSPI);
 bool sdOk = false;
+bool sdMounted = false;                 // SD.begin() has been attempted (mount is idempotent)
+static const char* CONFIG_PATH = "/ECUCFG.TXT";
+bool cfgLoadedFromSd = false;           // true once a saved config file was applied at boot
+bool cfgFileOnSd = false;               // cached: a /ECUCFG.TXT exists (updated on save/load, not polled)
 char sdLogPath[24] = "/ECU000.CSV";
 uint32_t lastSdTelemetryMs = 0;
 uint32_t sdWriteFailCount = 0;
@@ -1282,28 +1286,151 @@ void printSdStatus() {
   Serial.println("=========================");
 }
 
+// Mount the SD card once (idempotent). Used by BOTH config persistence and CSV
+// logging, so config can load even when logging is disabled. Returns true if a
+// usable card is present.
+bool mountSd() {
+  if (sdMounted) return sdOk;
+  sdMounted = true;
+  sdSPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+  if (!SD.begin(PIN_SD_CS, sdSPI, SD_SPI_HZ)) {
+    sdOk = false;
+    Serial.println("SD: SD.begin() FAIL. Check FAT32 card and pins CS=13 SCK=14 MOSI=23 MISO=27.");
+    return false;
+  }
+  if (SD.cardType() == CARD_NONE) {
+    sdOk = false;
+    Serial.println("SD: no card detected.");
+    return false;
+  }
+  sdOk = true;
+  return true;
+}
+
+static int clampCfgInt(long v, long lo, long hi) { return (int)(v < lo ? lo : (v > hi ? hi : v)); }
+
+// Persist all tunable config to /ECUCFG.TXT as key=value lines, so the ECU can be
+// configured once and reload on next power-up. Runtime/safety-sensitive state
+// (autoStart, throttle, web) is intentionally NOT persisted (always boots safe).
+bool saveConfigToSd() {
+  if (!mountSd()) { Serial.println("SAVECFG: no SD card."); addLog("SAVECFG FAIL no SD"); return false; }
+  SD.remove(CONFIG_PATH);   // clean overwrite (FILE_WRITE does not truncate on all cores)
+  File f = SD.open(CONFIG_PATH, FILE_WRITE);
+  if (!f) { Serial.println("SAVECFG: open FAIL."); addLog("SAVECFG FAIL open"); return false; }
+  f.println("# ECU config - auto-loaded on boot. Edit via Web UI Settings tab.");
+  f.print("idlerpm=");      f.println(cfg.idleRpm);
+  f.print("maxrpm=");       f.println(cfg.maxRpm);
+  f.print("rpmtol=");       f.println(cfg.rpmTolerance);
+  f.print("maxegt=");       f.println(cfg.maxEgtC);
+  f.print("maxgrad=");      f.println(cfg.maxTempGradientCps);
+  f.print("ppr=");          f.println((int)cfg.pulsesPerRev);
+  f.print("rpmfilter=");    f.println((uint32_t)rpmMinPulseUs);
+  f.print("rpmedge=");      f.println(rpmEdgeName());
+  f.print("introus=");      f.println(cfg.introFuelUs);
+  f.print("idleus=");       f.println(cfg.idleFuelUs);
+  f.print("maxus=");        f.println(cfg.maxFuelUs);
+  f.print("pumptestus=");   f.println(cfg.pumpTestUs);
+  f.print("purgeus=");      f.println(cfg.starterPurgeUs);
+  f.print("spinus=");       f.println(cfg.starterSpinUs);
+  f.print("assistus=");     f.println(cfg.starterAssistUs);
+  f.print("accelms=");      f.println(cfg.accelStepDelayMs);
+  f.print("decelms=");      f.println(cfg.decelStepDelayMs);
+  f.print("lowaccelms=");   f.println(cfg.lowAccelStepDelayMs);
+  f.print("lowdecelms=");   f.println(cfg.lowDecelStepDelayMs);
+  f.print("drystartms=");   f.println(cfg.dryStartRunMs);
+  f.print("acceltoidlems=");f.println(cfg.accelToIdleTimeoutMs);
+  f.print("cooltarget=");   f.println(cfg.cooldownTargetC);
+  f.print("coolstarter=");  f.println(cfg.cooldownStarterUs);
+  f.print("coolminms=");    f.println(cfg.cooldownMinMs);
+  f.print("cooltimeoutms=");f.println(cfg.cooldownTimeoutMs);
+  f.print("commtimeout=");  f.println(cfg.commTimeoutMs);
+  f.print("commwd=");       f.println(cfg.commWatchdogEnabled ? 1 : 0);
+  f.print("checklist=");    f.println(cfg.requireChecklistForStart ? 1 : 0);
+  f.print("egtdry=");       f.println(cfg.allowDryStartWhenEgtFault ? 1 : 0);
+  f.print("sdlog=");        f.println(cfg.sdLoggingEnabled ? 1 : 0);
+  f.close();
+  cfgFileOnSd = true;
+  Serial.println("SAVECFG: OK -> /ECUCFG.TXT");
+  addLog("CONFIG SAVED to SD");
+  return true;
+}
+
+void applyConfigKV(const String& key, const String& val) {
+  long n = val.toInt();
+  if      (key == "idlerpm")      cfg.idleRpm = clampCfgInt(n, 10000, 60000);
+  else if (key == "maxrpm")       cfg.maxRpm = clampCfgInt(n, 15000, 160000);
+  else if (key == "rpmtol")       cfg.rpmTolerance = clampCfgInt(n, 500, 15000);
+  else if (key == "maxegt")       cfg.maxEgtC = clampCfgInt(n, 400, 950);
+  else if (key == "maxgrad")      cfg.maxTempGradientCps = clampCfgInt(n, 50, 1000);
+  else if (key == "ppr")          cfg.pulsesPerRev = (n == 2) ? 2 : 1;
+  else if (key == "rpmfilter")    rpmMinPulseUs = (uint32_t)clampCfgInt(n, 20, 5000);
+  else if (key == "rpmedge")      rpmEdgeMode = (val == "FALLING") ? FALLING : RISING;
+  else if (key == "introus")      cfg.introFuelUs = clampCfgInt(n, 1000, 1250);
+  else if (key == "idleus")       cfg.idleFuelUs = clampCfgInt(n, 1000, 1270);
+  else if (key == "maxus")        cfg.maxFuelUs = clampCfgInt(n, 1100, 1300);
+  else if (key == "pumptestus")   cfg.pumpTestUs = clampCfgInt(n, 1000, 1225);
+  else if (key == "purgeus")      cfg.starterPurgeUs = clampCfgInt(n, 1000, 1500);
+  else if (key == "spinus")       cfg.starterSpinUs = clampCfgInt(n, 1000, 1500);
+  else if (key == "assistus")     cfg.starterAssistUs = clampCfgInt(n, 1000, 1500);
+  else if (key == "accelms")      cfg.accelStepDelayMs = clampCfgInt(n, 50, 2000);
+  else if (key == "decelms")      cfg.decelStepDelayMs = clampCfgInt(n, 50, 2000);
+  else if (key == "lowaccelms")   cfg.lowAccelStepDelayMs = clampCfgInt(n, 100, 3000);
+  else if (key == "lowdecelms")   cfg.lowDecelStepDelayMs = clampCfgInt(n, 100, 3000);
+  else if (key == "drystartms")   cfg.dryStartRunMs = (uint32_t)clampCfgInt(n, 1000, 15000);
+  else if (key == "acceltoidlems")cfg.accelToIdleTimeoutMs = (uint32_t)clampCfgInt(n, 5000, 60000);
+  else if (key == "cooltarget")   cfg.cooldownTargetC = clampCfgInt(n, 50, 250);
+  else if (key == "coolstarter")  cfg.cooldownStarterUs = clampCfgInt(n, 1000, 1200);
+  else if (key == "coolminms")    cfg.cooldownMinMs = (uint32_t)clampCfgInt(n, 1000, 30000);
+  else if (key == "cooltimeoutms")cfg.cooldownTimeoutMs = (uint32_t)clampCfgInt(n, 5000, 120000);
+  else if (key == "commtimeout")  cfg.commTimeoutMs = (uint32_t)clampCfgInt(n, 3000, 60000);
+  else if (key == "commwd")       cfg.commWatchdogEnabled = (n != 0);
+  else if (key == "checklist")    cfg.requireChecklistForStart = (n != 0);
+  else if (key == "egtdry")       cfg.allowDryStartWhenEgtFault = (n != 0);
+  else if (key == "sdlog")        cfg.sdLoggingEnabled = (n != 0);
+}
+
+// Load /ECUCFG.TXT (if present) and apply it, clamping every value to its valid
+// range so a corrupt file can't push a limit out of bounds. Call BEFORE
+// attachRpmInterrupt() so a persisted rpmedge/rpmfilter takes effect.
+bool loadConfigFromSd() {
+  if (!mountSd()) return false;
+  if (!SD.exists(CONFIG_PATH)) { cfgFileOnSd = false; Serial.println("LOADCFG: no /ECUCFG.TXT, using defaults."); return false; }
+  cfgFileOnSd = true;
+  File f = SD.open(CONFIG_PATH, FILE_READ);
+  if (!f) { Serial.println("LOADCFG: open FAIL, using defaults."); return false; }
+  int applied = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0 || line[0] == '#') continue;
+    int eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    String key = line.substring(0, eq); key.trim();
+    String val = line.substring(eq + 1); val.trim();
+    applyConfigKV(key, val);
+    applied++;
+  }
+  f.close();
+  // Re-assert cross-field invariants (same as the interactive set-commands enforce).
+  if (cfg.maxFuelUs < cfg.idleFuelUs) cfg.maxFuelUs = cfg.idleFuelUs;
+  if (cfg.maxRpm < cfg.idleRpm + 5000) cfg.maxRpm = cfg.idleRpm + 5000;
+  cfgLoadedFromSd = (applied > 0);
+  Serial.print("LOADCFG: applied "); Serial.print(applied); Serial.println(" keys from /ECUCFG.TXT");
+  if (applied > 0) addLog("CONFIG LOADED from SD");
+  return cfgLoadedFromSd;
+}
+
 void initSdLogging() {
   if (!cfg.sdLoggingEnabled) {
     Serial.println("SD logging disabled by config.");
     return;
   }
 
-  sdSPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
-  if (!SD.begin(PIN_SD_CS, sdSPI, SD_SPI_HZ)) {
-    sdOk = false;
-    Serial.println("SD LOG: SD.begin() FAIL. ECU continues without SD logging.");
-    Serial.println("Check FAT32 card and pins: CS=13 SCK=14 MOSI=23 MISO=27.");
+  if (!mountSd()) {
+    Serial.println("SD LOG: card not available. ECU continues without SD logging.");
     return;
   }
 
-  uint8_t cardType = SD.cardType();
-  if (cardType == CARD_NONE) {
-    sdOk = false;
-    Serial.println("SD LOG: no card detected. ECU continues without SD logging.");
-    return;
-  }
-
-  sdOk = true;
   sdWriteFailCount = 0;
 
   bool slotsFull = false;
@@ -1656,6 +1783,9 @@ String webStatusJson() {
   else s += "\"egt\":\"ERR " + jsonEscape(egtFaultString(egt.fault)) + "\",";
   s += "\"degt\":\"" + String(egt.gradientCps, 1) + " C/s\",";
   s += "\"rpm\":\"" + String(rpmData.rpm, 0) + "\",";
+  // Numeric values (unquoted) for the SVG gauges.
+  s += "\"rpmv\":" + String(rpmData.rpm, 0) + ",";
+  s += "\"egtv\":" + String(egt.ok ? egt.c : 0.0f, 0) + ",";
   s += "\"rtgt\":\"" + String(fuelTargetRpm) + "\",";
   s += "\"rnoise\":\"" + String(rpmNoiseName(rpmData.noise)) + "\",";
   s += "\"rpmDetail\":\"raw=" + String(rpmData.rawEdges) + " acc=" + String(rpmData.acceptedWindow) + " rej=" + String(rpmData.rejectedEdges) + " jit=" + String(rpmData.jitterPct, 1) + "%" + (rpmData.restPulseNoise ? " REST_GUARD" : "") + "\",";
@@ -1708,6 +1838,8 @@ String webStatusJson() {
   s += "\"swCommWd\":\"" + String(cfg.commWatchdogEnabled ? "ON" : "OFF") + "\",";
   s += "\"swSdlog\":\"" + String(cfg.sdLoggingEnabled ? "ON" : "OFF") + "\",";
   s += "\"swEgtDry\":\"" + String(cfg.allowDryStartWhenEgtFault ? "DRY" : "STRICT") + "\",";
+  s += "\"cfgOnSd\":\"" + String(cfgFileOnSd ? "YES" : "NO") + "\",";
+  s += "\"cfgLoaded\":\"" + String(cfgLoadedFromSd ? "YES" : "NO") + "\",";
   s += "\"logs\":\"" + logsJoined() + "\"";
   s += "}";
   return s;
@@ -1723,9 +1855,38 @@ h1{margin:8px 0 4px;font-size:24px}.sub{color:#9fb0d0;margin-bottom:14px}.grid{d
 .card{background:#151d33;border:1px solid #283451;border-radius:14px;padding:12px;box-shadow:0 2px 10px #0005}.label{color:#9fb0d0;font-size:12px;text-transform:uppercase}.val{font-size:22px;font-weight:700;margin-top:4px}.warn{color:#ffcc66}.bad{color:#ff7777}.ok{color:#7dffa1}
 .btns{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.btn{border:0;border-radius:10px;padding:10px 12px;background:#293855;color:#fff;font-weight:700}.danger{background:#8a2430}.go{background:#1e7042}.arm{background:#806020}.test{background:#244c80}
 table{width:100%;border-collapse:collapse;margin-top:8px}td,th{border-bottom:1px solid #283451;padding:8px;text-align:left}.small{font-size:12px;color:#9fb0d0}.log{background:#080c18;border-radius:10px;padding:10px;min-height:80px;font-family:monospace;font-size:12px;color:#c7d5ff}
-input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;padding:8px;width:90px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.pill{display:inline-block;border-radius:999px;padding:4px 9px;background:#263752}.pass{background:#145c34}.fail{background:#6a202b}.run{background:#6b551d}
+input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;padding:8px;width:90px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}.pill{display:inline-block;border-radius:999px;padding:4px 9px;background:#263752}.pass{background:#145c34}.fail{background:#6a202b}.run{background:#6b551d}
+.tabs{display:flex;gap:6px;margin:14px 0 10px}.tabb{flex:1;padding:12px 6px;border:0;background:#151d33;color:#9fb0d0;font-weight:700;font-size:15px;border-radius:12px;cursor:pointer}.tabb.on{background:#244c80;color:#fff;box-shadow:0 2px 10px #0006}
+.panel{display:none}.panel.on{display:block}
+.gwrap{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}.gauge{background:#151d33;border:1px solid #283451;border-radius:14px;padding:8px 14px 4px;text-align:center;flex:1;min-width:150px;max-width:260px}.gt{color:#9fb0d0;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:10px 0}.chip{border-radius:999px;padding:6px 12px;background:#263752;font-weight:700;font-size:13px}
+summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px 0 4px}
 </style></head><body><div class="wrap">
-<h1>ECU Test V1</h1><div class="sub">SoftAP ECU_TestV1 / admin1234 — http://192.168.4.1 · Toàn bộ điều khiển &amp; test qua web (không cần terminal)</div>
+<h1>ECU Test V1</h1><div class="sub">SoftAP ECU_TestV1 / admin1234 — http://192.168.4.1 · Điều khiển &amp; test hoàn toàn qua web</div>
+
+<div class="gwrap">
+<div class="gauge"><div class="gt">RPM</div>
+<svg viewBox="0 0 120 72" width="100%" style="max-width:230px">
+<path d="M10,62 A50,50 0 0,1 110,62" fill="none" stroke="#283451" stroke-width="11" stroke-linecap="round"/>
+<path id="g_rpm" d="M10,62 A50,50 0 0,1 110,62" fill="none" stroke="#7dffa1" stroke-width="11" stroke-linecap="round" stroke-dasharray="157" stroke-dashoffset="157"/>
+<text id="g_rpm_t" x="60" y="58" text-anchor="middle" font-size="19" font-weight="700" fill="#e9eefc">0</text>
+</svg></div>
+<div class="gauge"><div class="gt">EGT °C</div>
+<svg viewBox="0 0 120 72" width="100%" style="max-width:230px">
+<path d="M10,62 A50,50 0 0,1 110,62" fill="none" stroke="#283451" stroke-width="11" stroke-linecap="round"/>
+<path id="g_egt" d="M10,62 A50,50 0 0,1 110,62" fill="none" stroke="#7dffa1" stroke-width="11" stroke-linecap="round" stroke-dasharray="157" stroke-dashoffset="157"/>
+<text id="g_egt_t" x="60" y="58" text-anchor="middle" font-size="19" font-weight="700" fill="#e9eefc">0</text>
+</svg></div>
+</div>
+<div class="chips" id="chips"></div>
+
+<div class="tabs">
+<button class="tabb on" id="btab_run" onclick="tab('run')">▶ Run</button>
+<button class="tabb" id="btab_test" onclick="tab('test')">🧪 Testing</button>
+<button class="tabb" id="btab_set" onclick="tab('set')">⚙ Settings</button>
+</div>
+
+<div class="panel on" id="tab_run">
 <div class="grid" id="cards"></div>
 
 <h2>Controls</h2><div class="btns">
@@ -1741,7 +1902,9 @@ input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;p
 <div class="row small">EGT start mode: <b id="swEgtDry">-</b>
 <button class="btn" onclick="cmd('set egtstart dry')">EGT Dry</button>
 <button class="btn" onclick="cmd('set egtstart strict')">EGT Strict</button></div>
+</div><!-- /run -->
 
+<div class="panel" id="tab_test">
 <h2>Test Wizard</h2><div class="small">Pump Prime: rút ống nhiên liệu khỏi engine và xả ra bình/ca trước khi test.</div>
 <div class="btns">
 <button class="btn test" onclick="cmd('test egt')">EGT</button><button class="btn test" onclick="cmd('test rpm_noise')">RPM noise</button><button class="btn test" onclick="cmd('test ign')">IGN</button><button class="btn test" onclick="cmd('test starter')">Starter</button><button class="btn test" onclick="cmd('test starter_ign')">Starter+IGN EMI</button><button class="btn test" onclick="cmd('test valve1')">Valve 1</button><button class="btn test" onclick="cmd('test valve2')">Valve 2</button><button class="btn test" onclick="cmd('test pump')">Pump prime</button><button class="btn test" onclick="cmd('confirmkill')">Confirm kill</button><button class="btn" onclick="cmd('resetcheck')">Reset checklist</button>
@@ -1763,7 +1926,15 @@ input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;p
 <button class="btn test" onclick="cmd('valve2 on')">ON</button>
 <button class="btn danger" onclick="cmd('valve2 off')">OFF</button>
 <span class="small">(auto-off 10s)</span></div>
+</div><!-- /test -->
 
+<div class="panel" id="tab_set">
+<h2>Config trên thẻ SD</h2>
+<div class="row small">File trên SD: <b id="cfgOnSd">-</b> · nạp lúc boot: <b id="cfgLoaded">-</b></div>
+<div class="btns">
+<button class="btn go" onclick="if(confirm('Lưu toàn bộ config hiện tại vào thẻ SD? Lần sau bật máy sẽ tự nạp lại.'))cmd('savecfg')">💾 Lưu config vào SD</button>
+<button class="btn" onclick="if(confirm('Nạp lại config từ SD, ghi đè giá trị đang chỉnh?'))cmd('loadcfg')">↻ Nạp lại từ SD</button>
+</div>
 <h2>Tune — RPM &amp; Safety <span class="small">(tự nạp từ config; PWM/limit chỉ chỉnh khi WAITING/ABORTED)</span></h2><div class="row small">
 Idle RPM <input id="idlerpm" value="42000"><button class="btn" onclick="cmd('set idlerpm '+v('idlerpm'))">Set</button>
 Max RPM <input id="maxrpm" value="110000"><button class="btn" onclick="cmd('set maxrpm '+v('maxrpm'))">Set</button>
@@ -1825,6 +1996,7 @@ SD logging: <b id="swSdlog">-</b>
 <button class="btn" onclick="cmd('sdtest')">SD test write</button>
 </div>
 </details>
+</div><!-- /settings -->
 
 <h2>Event Log</h2><div class="log" id="logs"></div>
 </div><script>
@@ -1833,7 +2005,27 @@ function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,
 function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
 function setInp(id,val){var e=document.getElementById(id);if(e&&val!==undefined&&document.activeElement!==e)e.value=val;}
 function txt(id,val){var e=document.getElementById(id);if(e&&val!==undefined)e.textContent=val;}
-function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).then(d=>{let cards=[['MODE',d.mode],['STAGE',d.stage],['EGT',d.egt],['dEGT',d.degt],['RPM',d.rpm],['RPM Target',d.rtgt],['RPM Noise',d.rnoise],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['Throttle',d.thr],['ARM',d.arm],['AutoStart',d.auto],['Checklist',d.checklistOk],['SD',d.sd],['Abort',d.abort]];
+function tab(n){['run','test','set'].forEach(function(t){
+ document.getElementById('tab_'+t).classList.toggle('on',t==n);
+ document.getElementById('btab_'+t).classList.toggle('on',t==n);});}
+function gauge(arc,tid,val,max,warnFrac){
+ var f=max>0?Math.max(0,Math.min(1,val/max)):0;var L=157;
+ var a=document.getElementById(arc);a.style.strokeDashoffset=(L*(1-f)).toFixed(1);
+ a.setAttribute('stroke', f>=warnFrac?'#ff7777':(f>=0.75?'#ffcc66':'#7dffa1'));
+ document.getElementById(tid).textContent=Math.round(val);}
+function chip(lbl,val,cls){return '<span class="chip '+(cls||'')+'">'+lbl+': '+val+'</span>';}
+function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).then(d=>{
+ gauge('g_rpm','g_rpm_t',d.rpmv||0,parseInt(d.cfgMaxRpm)||110000,1.05);
+ gauge('g_egt','g_egt_t',d.egtv||0,parseInt(d.cfgMaxEgt)||680,0.85);
+ var abn=d.abort&&d.abort!='NONE'&&d.abort!='';
+ document.getElementById('chips').innerHTML=
+  chip('MODE',d.mode)+chip('STAGE',d.stage)+
+  chip('ARM',d.arm,d.arm=='ARMED'?'run':'')+
+  chip('AUTO',d.auto,d.auto=='ON'?'run':'')+
+  chip('NOISE',d.rnoise,d.rnoise=='CLEAN'?'pass':(d.rnoise=='NO_SIGNAL'?'':'fail'))+
+  chip('CHECK',d.checklistOk,d.checklistOk=='PASS'?'pass':'fail')+
+  (abn?chip('ABORT',d.abort,'fail'):'');
+ let cards=[['RPM',d.rpm],['EGT',d.egt],['dEGT',d.degt],['RPM Target',d.rtgt],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['Throttle',d.thr],['SD',d.sd]];
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
  document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
  setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('rpmtol',d.cfgRpmTol);setInp('maxegt',d.cfgMaxEgt);setInp('maxgrad',d.cfgMaxGrad);
@@ -1846,6 +2038,7 @@ function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).t
  setInp('commtimeout',d.cfgCommTimeout);
  txt('ppr',d.cfgPpr);txt('rpmedge',d.cfgRpmEdge);txt('swEgtDry',d.swEgtDry);
  txt('swChecklist',d.swChecklist);txt('swCommWd',d.swCommWd);txt('swSdlog',d.swSdlog);
+ txt('cfgOnSd',d.cfgOnSd);txt('cfgLoaded',d.cfgLoaded);
  document.getElementById('logs').innerHTML=d.logs||'';});}
 setInterval(load,700);load();
 </script></body></html>
@@ -2253,6 +2446,7 @@ void printHelp() {
   Serial.println("checklist | resetcheck | confirmkill | set checklist on/off");
   Serial.println("test egt|rpm_noise|ign|starter|starter_ign|valve1|valve2|pump|kill");
   Serial.println("sdstatus | sdtest | set sdlog on/off");
+  Serial.println("savecfg | loadcfg      -> save/reload tunable config to /ECUCFG.TXT on SD (auto-loaded on boot)");
   Serial.println("web on | web off");
 }
 
@@ -2354,6 +2548,8 @@ void handleCommand(String cmd) {
   if (cmd == "showcfg" || cmd == "cfg") { printConfig(); return; }
   if (cmd == "sdstatus") { printSdStatus(); return; }
   if (cmd == "sdtest") { addLog("SDTEST manual event"); Serial.println("SDTEST event written if SD=OK."); return; }
+  if (cmd == "savecfg") { saveConfigToSd(); return; }
+  if (cmd == "loadcfg") { if (loadConfigFromSd()) { resetRpmStats(); attachRpmInterrupt(); Serial.println("Config reloaded from SD."); } else Serial.println("No saved config applied."); return; }
   if (cmd == "set sdlog on") { cfg.sdLoggingEnabled = true; addLog("SD LOG ON"); Serial.println("SD logging ON"); return; }
   if (cmd == "set sdlog off") { addLog("SD LOG OFF"); cfg.sdLoggingEnabled = false; Serial.println("SD logging OFF"); return; }
   if (cmd == "rpmreset") { resetRpmStats(); return; }
@@ -2537,6 +2733,9 @@ void setup() {
   pinMode(PIN_STATUS_LED, OUTPUT); writeStatusLed(false);
   pinMode(PIN_USER_BTN, INPUT_PULLUP); // external 10k pull-up is also OK; button shorts to GND
   pinMode(PIN_RPM, INPUT);
+  // Load saved tuning from SD before wiring the RPM interrupt, so a persisted
+  // rpmedge/rpmfilter takes effect on this boot. Values are clamped on load.
+  loadConfigFromSd();
   attachRpmInterrupt();
   escAttach(PIN_ESC_PUMP, LEDC_CH_PUMP);
   escAttach(PIN_ESC_START, LEDC_CH_START);
