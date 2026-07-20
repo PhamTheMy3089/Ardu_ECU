@@ -588,7 +588,9 @@ sau khi arm).
 arm2
 test ign          -> glow plug bật 1s, quan sát dòng điện/nhiệt bằng tay (cẩn thận nóng)
 arm2
-test starter      -> starter quay 3s ở us cấu hình, xem RPM có tăng lên không
+test starter      -> starter quay 5s ở us cấu hình, xem RPM có tăng lên không
+                     (RPM/RNOISE được chốt LÚC starter còn quay, ngay trước khi tắt —
+                      tránh rest-guard ép RPM=0; 5s đủ để tốc độ ổn định, hết báo NOISY)
 arm2
 test starter_ign  -> starter + glow cùng lúc, kiểm tra EMI có làm nhiễu RPM không (resetRpmStats() trước bước này đã fix trong CODE_REVIEW_FINDINGS.md)
 arm2

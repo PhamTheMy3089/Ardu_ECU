@@ -134,6 +134,13 @@ static const uint32_t EGT_STUCK_WARN_MS = 6000;  // warn (log only) if EGT reads
 static const uint32_t STATUS_PRINT_MS = 250;
 static const uint32_t STAGE2_ARM_TIME_MS = 10000;
 static const uint32_t STARTER_PROVE_TIMEOUT_MS = 1500;
+// Test Wizard starter spin duration. 3s was too short: from a standing start the
+// motor is still accelerating at the end of the window, so per-window jitter stays
+// high and the RPM verdict false-flags NOISY before the speed has settled. 5s lets
+// the motor reach a steady RPM so the final sample window reads CLEAN (matches the
+// bench TEST_STARTER.ino observation that a fixed PWM settles within ~1-1.5s/step
+// but a full spin-up from OFF takes noticeably longer).
+static const uint32_t STARTER_TEST_SPIN_MS = 5000;
 static const uint32_t VALVE_TEST_TIMEOUT_MS = 10000;  // bench valve1/valve2 "on" auto-off window
 // Faster RPM-loss detection while fueled at running RPM (IDLING/OPERATING), so fuel
 // is cut promptly after a real flameout instead of waiting the full 1s signal timeout.
@@ -1487,14 +1494,14 @@ void runTestByName(const String& nameIn) {
       resetRpmStats();
       startUs = cfg.starterSpinUs;
       applyOutputs();
-      startTimedTest(id, 3000);
+      startTimedTest(id, STARTER_TEST_SPIN_MS);
       break;
     case TEST_STARTER_IGN:
       resetRpmStats();
       startUs = cfg.starterSpinUs;
       ignCmd = true;
       applyOutputs();
-      startTimedTest(id, 3000);
+      startTimedTest(id, STARTER_TEST_SPIN_MS);
       break;
     case TEST_VALVE1:
       valve1Cmd = true;
@@ -1541,25 +1548,37 @@ void updateActiveTest() {
       applyOutputs();
       setChecklist(done, TEST_PASS, "IGN pulse completed");
       break;
-    case TEST_STARTER:
+    case TEST_STARTER: {
+      // Read RPM/noise WHILE the starter is still spinning. Stopping it first would
+      // satisfy rpmAtRestGuardCondition() (WAITING + startStage==ST_NONE + startUs
+      // back at SAFE), which forces rpmData.rpm=0 / RPM_REST_NOISE - that made the
+      // verdict read RPM=0 the instant the starter stopped.
+      updateRpm();
+      bool ok = rpmMeasurementUsable() && rpmData.rpm >= cfg.starterProveMinRpm;
+      float capturedRpm = rpmData.rpm;
+      RpmNoiseLevel capturedNoise = rpmData.noise;
       startUs = ESC_SAFE_US;
       applyOutputs();
-      updateRpm();
-      if (rpmMeasurementUsable() && rpmData.rpm >= cfg.starterProveMinRpm)
-        setChecklist(done, TEST_PASS, String("RPM=") + String(rpmData.rpm, 0) + " RNOISE=" + rpmNoiseName(rpmData.noise));
+      if (ok)
+        setChecklist(done, TEST_PASS, String("RPM=") + String(capturedRpm, 0) + " RNOISE=" + rpmNoiseName(capturedNoise));
       else
-        setChecklist(done, TEST_FAIL, String("RPM/RNOISE bad: RPM=") + String(rpmData.rpm, 0) + " RNOISE=" + rpmNoiseName(rpmData.noise));
+        setChecklist(done, TEST_FAIL, String("RPM/RNOISE bad: RPM=") + String(capturedRpm, 0) + " RNOISE=" + rpmNoiseName(capturedNoise));
       break;
-    case TEST_STARTER_IGN:
+    }
+    case TEST_STARTER_IGN: {
+      // Same as TEST_STARTER: capture the noise verdict while spinning, before the
+      // rest-guard zeroes it.
+      updateRpm();
+      RpmNoiseLevel capturedNoise = rpmData.noise;
       startUs = ESC_SAFE_US;
       ignCmd = false;
       applyOutputs();
-      updateRpm();
-      if (rpmData.noise == RPM_NO_SIGNAL || rpmData.noise == RPM_CLEAN)
-        setChecklist(done, TEST_PASS, String("EMI OK RNOISE=") + rpmNoiseName(rpmData.noise));
+      if (capturedNoise == RPM_NO_SIGNAL || capturedNoise == RPM_CLEAN)
+        setChecklist(done, TEST_PASS, String("EMI OK RNOISE=") + rpmNoiseName(capturedNoise));
       else
-        setChecklist(done, TEST_FAIL, String("EMI/RPM noisy RNOISE=") + rpmNoiseName(rpmData.noise));
+        setChecklist(done, TEST_FAIL, String("EMI/RPM noisy RNOISE=") + rpmNoiseName(capturedNoise));
       break;
+    }
     case TEST_VALVE1:
       valve1Cmd = false;
       applyOutputs();
