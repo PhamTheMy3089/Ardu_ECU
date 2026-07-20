@@ -1648,7 +1648,7 @@ String webStatusJson() {
   String ckWhy;
   bool ckOk = checklistPassedForAutoStart(ckWhy);
   String s;
-  s.reserve(3072);  // pre-size for the worst-case payload (status + checklist + 16 long logs + cfg) to avoid heap churn per /api poll
+  s.reserve(4096);  // pre-size for the worst-case payload (status + checklist + 16 long logs + full cfg) to avoid heap churn per /api poll
   s = "{";
   s += "\"mode\":\"" + String(modeName(ecuMode)) + "\",";
   s += "\"stage\":\"" + String(stageName(startStage)) + "\",";
@@ -1685,6 +1685,29 @@ String webStatusJson() {
   s += "\"cfgIdleUs\":\"" + String(cfg.idleFuelUs) + "\",";
   s += "\"cfgMaxUs\":\"" + String(cfg.maxFuelUs) + "\",";
   s += "\"cfgPumpTestUs\":\"" + String(cfg.pumpTestUs) + "\",";
+  // RPM sensor + safety + timing config, so every Web UI tune input auto-populates
+  // from the live config (no terminal needed).
+  s += "\"cfgRpmTol\":\"" + String(cfg.rpmTolerance) + "\",";
+  s += "\"cfgPpr\":\"" + String(cfg.pulsesPerRev) + "\",";
+  s += "\"cfgRpmFilter\":\"" + String((uint32_t)rpmMinPulseUs) + "\",";
+  s += "\"cfgRpmEdge\":\"" + String(rpmEdgeName()) + "\",";
+  s += "\"cfgMaxGrad\":\"" + String(cfg.maxTempGradientCps) + "\",";
+  s += "\"cfgDryStartMs\":\"" + String(cfg.dryStartRunMs) + "\",";
+  s += "\"cfgAccelMs\":\"" + String(cfg.accelStepDelayMs) + "\",";
+  s += "\"cfgDecelMs\":\"" + String(cfg.decelStepDelayMs) + "\",";
+  s += "\"cfgLowAccelMs\":\"" + String(cfg.lowAccelStepDelayMs) + "\",";
+  s += "\"cfgLowDecelMs\":\"" + String(cfg.lowDecelStepDelayMs) + "\",";
+  s += "\"cfgAccelToIdleMs\":\"" + String(cfg.accelToIdleTimeoutMs) + "\",";
+  s += "\"cfgCoolTarget\":\"" + String(cfg.cooldownTargetC) + "\",";
+  s += "\"cfgCoolStarter\":\"" + String(cfg.cooldownStarterUs) + "\",";
+  s += "\"cfgCoolMinMs\":\"" + String(cfg.cooldownMinMs) + "\",";
+  s += "\"cfgCoolTimeoutMs\":\"" + String(cfg.cooldownTimeoutMs) + "\",";
+  s += "\"cfgCommTimeout\":\"" + String(cfg.commTimeoutMs) + "\",";
+  // Interlock/toggle states so the Web UI can show and flip them.
+  s += "\"swChecklist\":\"" + String(cfg.requireChecklistForStart ? "ON" : "OFF") + "\",";
+  s += "\"swCommWd\":\"" + String(cfg.commWatchdogEnabled ? "ON" : "OFF") + "\",";
+  s += "\"swSdlog\":\"" + String(cfg.sdLoggingEnabled ? "ON" : "OFF") + "\",";
+  s += "\"swEgtDry\":\"" + String(cfg.allowDryStartWhenEgtFault ? "DRY" : "STRICT") + "\",";
   s += "\"logs\":\"" + logsJoined() + "\"";
   s += "}";
   return s;
@@ -1702,23 +1725,66 @@ h1{margin:8px 0 4px;font-size:24px}.sub{color:#9fb0d0;margin-bottom:14px}.grid{d
 table{width:100%;border-collapse:collapse;margin-top:8px}td,th{border-bottom:1px solid #283451;padding:8px;text-align:left}.small{font-size:12px;color:#9fb0d0}.log{background:#080c18;border-radius:10px;padding:10px;min-height:80px;font-family:monospace;font-size:12px;color:#c7d5ff}
 input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;padding:8px;width:90px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.pill{display:inline-block;border-radius:999px;padding:4px 9px;background:#263752}.pass{background:#145c34}.fail{background:#6a202b}.run{background:#6b551d}
 </style></head><body><div class="wrap">
-<h1>ECU Test V1</h1><div class="sub">SoftAP ECU_TestV1 / admin1234 — http://192.168.4.1</div>
+<h1>ECU Test V1</h1><div class="sub">SoftAP ECU_TestV1 / admin1234 — http://192.168.4.1 · Toàn bộ điều khiển &amp; test qua web (không cần terminal)</div>
 <div class="grid" id="cards"></div>
+
 <h2>Controls</h2><div class="btns">
-<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button><button class="btn go" onclick="cmd('autostart on')">AutoStart ON</button><button class="btn go" onclick="cmd('startidle')">START IDLE</button>
-<button class="btn danger" onclick="cmd('stop')">SOFT STOP</button><button class="btn danger" onclick="cmd('off')">SAFE OFF</button><button class="btn" onclick="cmd('rpmreset')">RPM RESET</button><button class="btn" onclick="cmd('set egtstart dry')">EGT Dry</button><button class="btn" onclick="cmd('set egtstart strict')">EGT Strict</button>
+<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
+<button class="btn go" onclick="cmd('startidle')">START IDLE</button>
+<button class="btn go" onclick="cmd('autostart on')">AutoStart ON</button>
+<button class="btn" onclick="cmd('autostart off')">AutoStart OFF</button>
+<button class="btn danger" onclick="cmd('stop')">SOFT STOP</button>
+<button class="btn danger" onclick="cmd('off')">SAFE OFF</button>
+<button class="btn" onclick="if(confirm('Clear abort?'))cmd('clearabort')">CLEAR ABORT</button>
+<button class="btn" onclick="cmd('rpmreset')">RPM RESET</button>
 </div>
+<div class="row small">EGT start mode: <b id="swEgtDry">-</b>
+<button class="btn" onclick="cmd('set egtstart dry')">EGT Dry</button>
+<button class="btn" onclick="cmd('set egtstart strict')">EGT Strict</button></div>
+
 <h2>Test Wizard</h2><div class="small">Pump Prime: rút ống nhiên liệu khỏi engine và xả ra bình/ca trước khi test.</div>
 <div class="btns">
 <button class="btn test" onclick="cmd('test egt')">EGT</button><button class="btn test" onclick="cmd('test rpm_noise')">RPM noise</button><button class="btn test" onclick="cmd('test ign')">IGN</button><button class="btn test" onclick="cmd('test starter')">Starter</button><button class="btn test" onclick="cmd('test starter_ign')">Starter+IGN EMI</button><button class="btn test" onclick="cmd('test valve1')">Valve 1</button><button class="btn test" onclick="cmd('test valve2')">Valve 2</button><button class="btn test" onclick="cmd('test pump')">Pump prime</button><button class="btn test" onclick="cmd('confirmkill')">Confirm kill</button><button class="btn" onclick="cmd('resetcheck')">Reset checklist</button>
 </div><table><thead><tr><th>Step</th><th>Result</th><th>Note</th></tr></thead><tbody id="ck"></tbody></table>
-<h2>Tune quick set <span class="small">(giá trị tự nạp từ config; PWM/limit chỉ chỉnh khi WAITING/ABORTED)</span></h2><div class="row small">
+
+<h2>Manual Actuator Tests <span class="small">(bench; cần ARM 10s trước)</span></h2>
+<div class="row small">Starter — PWM us <input id="sus" value="1200"> Duration ms <input id="sms" value="3000">
+<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
+<button class="btn test" onclick="cmd('starttest '+v('sus')+' '+v('sms'))">Run starter</button></div>
+<div class="row small">Pump (xả ra bình/ca, KHÔNG gắn engine) — PWM us <input id="pus" value="1160"> Duration ms <input id="pms" value="1500">
+<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
+<button class="btn test" onclick="cmd('pumptest '+v('pus')+' '+v('pms'))">Run pump</button></div>
+<div class="row small">Igniter/glow — Duration ms <input id="igms" value="1000">
+<button class="btn test" onclick="cmd('ignpulse '+v('igms'))">Pulse glow</button></div>
+<div class="row small">Valve 1 (Start solenoid) —
+<button class="btn test" onclick="cmd('valve1 on')">ON</button>
+<button class="btn danger" onclick="cmd('valve1 off')">OFF</button>
+&nbsp;&nbsp;Valve 2 (Main oil) —
+<button class="btn test" onclick="cmd('valve2 on')">ON</button>
+<button class="btn danger" onclick="cmd('valve2 off')">OFF</button>
+<span class="small">(auto-off 10s)</span></div>
+
+<h2>Tune — RPM &amp; Safety <span class="small">(tự nạp từ config; PWM/limit chỉ chỉnh khi WAITING/ABORTED)</span></h2><div class="row small">
 Idle RPM <input id="idlerpm" value="42000"><button class="btn" onclick="cmd('set idlerpm '+v('idlerpm'))">Set</button>
 Max RPM <input id="maxrpm" value="110000"><button class="btn" onclick="cmd('set maxrpm '+v('maxrpm'))">Set</button>
-Max EGT <input id="maxegt" value="680"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
+RPM tol <input id="rpmtol" value="5000"><button class="btn" onclick="cmd('set rpmtol '+v('rpmtol'))">Set</button>
 Throttle <input id="thr" value="0"><button class="btn" onclick="cmd('set throttle '+v('thr'))">Set</button>
+</div><div class="row small">
+Max EGT <input id="maxegt" value="680"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
+Max grad C/s <input id="maxgrad" value="200"><button class="btn" onclick="cmd('set maxgrad '+v('maxgrad'))">Set</button>
 </div>
-<h2>Starter &amp; Fuel PWM (tự nạp từ config)</h2><div class="row small">
+
+<h2>Tune — RPM sensor</h2><div class="row small">
+PPR (xung/vòng): <b id="ppr">-</b>
+<button class="btn" onclick="cmd('set ppr 1')">1</button>
+<button class="btn" onclick="cmd('set ppr 2')">2</button>
+&nbsp; RPM filter us <input id="rpmfilter" value="120"><button class="btn" onclick="cmd('set rpmfilter '+v('rpmfilter'))">Set</button>
+&nbsp; Edge: <b id="rpmedge">-</b>
+<button class="btn" onclick="cmd('set rpmedge rising')">Rising</button>
+<button class="btn" onclick="cmd('set rpmedge falling')">Falling</button>
+</div>
+
+<h2>Tune — Starter &amp; Fuel PWM</h2><div class="row small">
 Purge us <input id="purgeus" value="1100"><button class="btn" onclick="cmd('set purgeus '+v('purgeus'))">Set</button>
 Spin us <input id="spinus" value="1200"><button class="btn" onclick="cmd('set spinus '+v('spinus'))">Set</button>
 Assist us <input id="assistus" value="1200"><button class="btn" onclick="cmd('set assistus '+v('assistus'))">Set</button>
@@ -1728,28 +1794,58 @@ Idle us <input id="idleus" value="1175"><button class="btn" onclick="cmd('set id
 Max us <input id="maxus" value="1260"><button class="btn" onclick="cmd('set maxus '+v('maxus'))">Set</button>
 Pump test us <input id="pumptestus" value="1160"><button class="btn" onclick="cmd('set pumptestus '+v('pumptestus'))">Set</button>
 </div>
-<h2>Starter Manual Test (no fuel/ign, bench only)</h2><div class="row small">
-PWM us <input id="sus" value="1200"> Duration ms <input id="sms" value="3000">
-<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
-<button class="btn test" onclick="cmd('starttest '+v('sus')+' '+v('sms'))">Run</button>
+
+<details><summary><b>Advanced — Timing, cooldown &amp; interlocks</b></summary>
+<div class="row small">
+Accel ms <input id="accelms" value="200"><button class="btn" onclick="cmd('set accelms '+v('accelms'))">Set</button>
+Decel ms <input id="decelms" value="200"><button class="btn" onclick="cmd('set decelms '+v('decelms'))">Set</button>
+Low accel ms <input id="lowaccelms" value="400"><button class="btn" onclick="cmd('set lowaccelms '+v('lowaccelms'))">Set</button>
+Low decel ms <input id="lowdecelms" value="400"><button class="btn" onclick="cmd('set lowdecelms '+v('lowdecelms'))">Set</button>
+</div><div class="row small">
+Dry start ms <input id="drystartms" value="5000"><button class="btn" onclick="cmd('set drystartms '+v('drystartms'))">Set</button>
+Accel→idle ms <input id="acceltoidlems" value="20000"><button class="btn" onclick="cmd('set acceltoidlems '+v('acceltoidlems'))">Set</button>
+</div><div class="row small">
+Cool target C <input id="cooltarget" value="120"><button class="btn" onclick="cmd('set cooltarget '+v('cooltarget'))">Set</button>
+Cool starter us <input id="coolstarter" value="1100"><button class="btn" onclick="cmd('set coolstarter '+v('coolstarter'))">Set</button>
+Cool min ms <input id="coolminms" value="5000"> timeout ms <input id="cooltimeoutms" value="45000">
+<button class="btn" onclick="cmd('set cooldownms '+v('coolminms')+' '+v('cooltimeoutms'))">Set</button>
+</div><div class="row small">
+Comm timeout ms <input id="commtimeout" value="8000"><button class="btn" onclick="cmd('set commtimeout '+v('commtimeout'))">Set</button>
+</div><div class="row small">
+Checklist interlock: <b id="swChecklist">-</b>
+<button class="btn" onclick="cmd('set checklist on')">ON</button>
+<button class="btn danger" onclick="cmd('set checklist off')">OFF</button>
+&nbsp; Comm watchdog: <b id="swCommWd">-</b>
+<button class="btn" onclick="cmd('set commwatchdog on')">ON</button>
+<button class="btn danger" onclick="cmd('set commwatchdog off')">OFF</button>
+</div><div class="row small">
+SD logging: <b id="swSdlog">-</b>
+<button class="btn" onclick="cmd('set sdlog on')">ON</button>
+<button class="btn" onclick="cmd('set sdlog off')">OFF</button>
+<button class="btn" onclick="cmd('sdtest')">SD test write</button>
 </div>
-<h2>Pump Manual Test (bench only, xả ra bình/ca, KHÔNG gắn engine)</h2><div class="row small">
-PWM us <input id="pus" value="1160"> Duration ms <input id="pms" value="1500">
-<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
-<button class="btn test" onclick="cmd('pumptest '+v('pus')+' '+v('pms'))">Run</button>
-</div>
+</details>
+
 <h2>Event Log</h2><div class="log" id="logs"></div>
 </div><script>
 function v(id){return document.getElementById(id).value}
 function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,200))}
 function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
 function setInp(id,val){var e=document.getElementById(id);if(e&&val!==undefined&&document.activeElement!==e)e.value=val;}
-function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).then(d=>{let cards=[['MODE',d.mode],['STAGE',d.stage],['EGT',d.egt],['dEGT',d.degt],['RPM',d.rpm],['RPM Target',d.rtgt],['RPM Noise',d.rnoise],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['ARM',d.arm],['Checklist',d.checklistOk],['SD',d.sd],['Abort',d.abort]];
+function txt(id,val){var e=document.getElementById(id);if(e&&val!==undefined)e.textContent=val;}
+function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).then(d=>{let cards=[['MODE',d.mode],['STAGE',d.stage],['EGT',d.egt],['dEGT',d.degt],['RPM',d.rpm],['RPM Target',d.rtgt],['RPM Noise',d.rnoise],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['Throttle',d.thr],['ARM',d.arm],['AutoStart',d.auto],['Checklist',d.checklistOk],['SD',d.sd],['Abort',d.abort]];
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
  document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
- setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('maxegt',d.cfgMaxEgt);
+ setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('rpmtol',d.cfgRpmTol);setInp('maxegt',d.cfgMaxEgt);setInp('maxgrad',d.cfgMaxGrad);
+ setInp('rpmfilter',d.cfgRpmFilter);
  setInp('purgeus',d.cfgPurgeUs);setInp('spinus',d.cfgSpinUs);setInp('assistus',d.cfgAssistUs);
  setInp('introus',d.cfgIntroUs);setInp('idleus',d.cfgIdleUs);setInp('maxus',d.cfgMaxUs);setInp('pumptestus',d.cfgPumpTestUs);
+ setInp('accelms',d.cfgAccelMs);setInp('decelms',d.cfgDecelMs);setInp('lowaccelms',d.cfgLowAccelMs);setInp('lowdecelms',d.cfgLowDecelMs);
+ setInp('drystartms',d.cfgDryStartMs);setInp('acceltoidlems',d.cfgAccelToIdleMs);
+ setInp('cooltarget',d.cfgCoolTarget);setInp('coolstarter',d.cfgCoolStarter);setInp('coolminms',d.cfgCoolMinMs);setInp('cooltimeoutms',d.cfgCoolTimeoutMs);
+ setInp('commtimeout',d.cfgCommTimeout);
+ txt('ppr',d.cfgPpr);txt('rpmedge',d.cfgRpmEdge);txt('swEgtDry',d.swEgtDry);
+ txt('swChecklist',d.swChecklist);txt('swCommWd',d.swCommWd);txt('swSdlog',d.swSdlog);
  document.getElementById('logs').innerHTML=d.logs||'';});}
 setInterval(load,700);load();
 </script></body></html>
