@@ -627,7 +627,8 @@ arm2
 pumptest 1160 1500   -> bơm chạy 1500ms ở 1160us, đo ml thực tế đối chiếu bảng calib
 ```
 
-> Trần bench `pumptest` hiện là **1000..1225µs**. Nút "Pump prime" trên Web UI
+> Trần bench `pumptest` hiện là **1000..1225µs** (thời lượng `ms` **không giới hạn**
+> — nhập bao nhiêu chạy bấy nhiêu, tự tắt sau `ms`; `starttest` cũng vậy). Nút "Pump prime" trên Web UI
 > chạy ở `pumpTestUs` = **1160µs** (mặc định) — mức flow **thấp nhất đã đo thực
 > tế** (50 ml/phút), an toàn hơn cho bench test. Vẫn nên quét vài mức us khác
 > để xác nhận độ tuyến tính (dùng panel **"Pump Manual Test"** trên Web UI,

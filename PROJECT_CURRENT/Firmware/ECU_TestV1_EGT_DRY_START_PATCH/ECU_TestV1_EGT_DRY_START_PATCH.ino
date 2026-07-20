@@ -2139,7 +2139,7 @@ void printHelp() {
   Serial.println("autostart on/off      -> enable/disable auto-idle runtime");
   Serial.println("ignpulse 500..3000    -> glow ON ms then auto OFF");
   Serial.println("starttest us ms       -> starter test, e.g. starttest 1100 3000");
-  Serial.println("pumptest us [ms]      -> bench pump verify only, auto-off default 1500ms, max 5000ms");
+  Serial.println("pumptest us [ms]      -> bench pump verify only, auto-off after ms (default 1500ms, no cap)");
   Serial.println("valve1 on/off (Start solenoid, bench-only) | valve2 on/off (Main oil valve, bench-only)");
   Serial.println("startidle             -> guarded auto-idle start sequence");
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
@@ -2311,8 +2311,10 @@ void handleCommand(String cmd) {
     if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; }
     if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: starttest only while WAITING/ABORTED."); return; }
     int us; uint32_t ms; if (!parseTwoInts(cmd, us, ms)) { Serial.println("ERROR: use starttest <us> <ms>"); return; }
-    if (us < 1000 || us > 1300 || ms < 500 || ms > 10000) { Serial.println("ERROR: us 1000..1300, ms 500..10000"); return; }
-    startUs = us; manualStartOffAtMs = millis() + ms; applyOutputs(); Serial.println("STARTER TEST RUNNING"); return;
+    // Duration is not capped: bench manual test runs exactly the ms the user enters.
+    // (us still bounded for ESC safety.) Stop early anytime with 'off'/'stop'.
+    if (us < 1000 || us > 1300) { Serial.println("ERROR: us 1000..1300"); return; }
+    startUs = us; manualStartOffAtMs = millis() + ms; applyOutputs(); Serial.print("STARTER TEST RUNNING for "); Serial.print(ms); Serial.println(" ms"); return;
   }
 
   if (cmd.startsWith("pumptest ")) {
@@ -2325,8 +2327,9 @@ void handleCommand(String cmd) {
     int us = (sp < 0) ? args.toInt() : args.substring(0, sp).toInt();
     uint32_t ms = (sp < 0) ? 1500UL : (uint32_t)args.substring(sp + 1).toInt();
 
+    // Duration is not capped: bench manual pump test runs exactly the ms the user
+    // enters. (us still bounded for ESC safety.) Stop early anytime with 'off'/'stop'.
     if (us < 1000 || us > 1225) { Serial.println("ERROR: bench pumptest limited 1000..1225 us"); return; }
-    if (ms < 200 || ms > 5000) { Serial.println("ERROR: pumptest ms 200..5000"); return; }
     if (fuelCommandBlockedByHotEgt()) {
       Serial.print("PUMPTEST BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
       Serial.print("C > cooldown target "); Serial.print(cfg.cooldownTargetC);
