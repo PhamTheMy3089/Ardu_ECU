@@ -243,9 +243,11 @@ struct Config {
   int maxFuelUs = 1260;         // ~280 ml/min preview
 
   // Bench pump-prime test PWM (Test Wizard "Pump prime"). Decoupled from
-  // introFuelUs so the prime volume can be tuned high (default 1210us ~166 ml/min)
-  // without making the real start's light-off dose over-rich or exceeding idle.
-  int pumpTestUs = 1210;
+  // introFuelUs so it can be tuned independently. Default is the LOWEST point
+  // actually measured on the bench (Luu_Luong_Bom.txt: 1160us ~50 ml/min) -
+  // 1210us was only an interpolated guess between calibration points, never
+  // verified with a real flow measurement.
+  int pumpTestUs = 1160;
 
   bool requireChecklistForStart = true; // require Test Wizard PASS before startidle
   bool webEnabled = true;               // SoftAP Web UI enabled by default
@@ -536,8 +538,16 @@ int usFromFlow(float mlMin) {
 void applyOutputs() {
   pumpUs = constrain(pumpUs, ESC_MIN_US, ESC_MAX_US);
   startUs = constrain(startUs, ESC_MIN_US, ESC_MAX_US);
-  escWriteUs(PIN_ESC_PUMP, LEDC_CH_PUMP, pumpUs);
-  escWriteUs(PIN_ESC_START, LEDC_CH_START, startUs);
+  // Chi goi ledcWrite() khi gia tri thuc su doi. applyOutputs() duoc goi moi
+  // vong loop(), va ledcWrite() lap lai khong can thiet (gia tri khong doi)
+  // co the chiem CPU/critical-section toi muc anh huong ISR dem xung RPM -
+  // da xac nhan bang TEST_RPM_RAWCOUNT.ino (trần cứng RAW_EDGES/s bien mat
+  // sau khi bo goi lai khong can thiet nay). escAttach() chi goi 1 lan trong
+  // setup() nen cache nay khong bi lech so voi trang thai LEDC thuc te.
+  static int lastPumpUs = -1;
+  static int lastStartUs = -1;
+  if (pumpUs != lastPumpUs) { escWriteUs(PIN_ESC_PUMP, LEDC_CH_PUMP, pumpUs); lastPumpUs = pumpUs; }
+  if (startUs != lastStartUs) { escWriteUs(PIN_ESC_START, LEDC_CH_START, startUs); lastStartUs = startUs; }
   writeActiveDigital(PIN_IGN, ignCmd, IGN_ACTIVE_HIGH);
   writeActiveDigital(PIN_VALVE_1, valve1Cmd, VALVE_ACTIVE_HIGH);
   writeActiveDigital(PIN_VALVE_2, valve2Cmd, VALVE_ACTIVE_HIGH);
@@ -1506,7 +1516,7 @@ void runTestByName(const String& nameIn) {
       }
       Serial.println("PUMP PRIME SAFETY: remove engine inlet tube and discharge fuel to container before running.");
       fuelValvesAuto(true);          // similar to ENJET oil pump test linking main fuel valve
-      pumpUs = cfg.pumpTestUs;       // dedicated bench prime PWM (default 1210us)
+      pumpUs = cfg.pumpTestUs;       // dedicated bench prime PWM (default 1160us, lowest measured point)
       fuelTargetUs = cfg.pumpTestUs;
       Serial.print("PUMP PRIME at "); Serial.print(cfg.pumpTestUs); Serial.print("us (~");
       Serial.print(flowFromUs(cfg.pumpTestUs), 1); Serial.println(" ml/min)");
@@ -1697,12 +1707,17 @@ Assist us <input id="assistus" value="1200"><button class="btn" onclick="cmd('se
 Intro us <input id="introus" value="1160"><button class="btn" onclick="cmd('set intro '+v('introus'))">Set</button>
 Idle us <input id="idleus" value="1175"><button class="btn" onclick="cmd('set idleus '+v('idleus'))">Set</button>
 Max us <input id="maxus" value="1260"><button class="btn" onclick="cmd('set maxus '+v('maxus'))">Set</button>
-Pump test us <input id="pumptestus" value="1210"><button class="btn" onclick="cmd('set pumptestus '+v('pumptestus'))">Set</button>
+Pump test us <input id="pumptestus" value="1160"><button class="btn" onclick="cmd('set pumptestus '+v('pumptestus'))">Set</button>
 </div>
 <h2>Starter Manual Test (no fuel/ign, bench only)</h2><div class="row small">
 PWM us <input id="sus" value="1200"> Duration ms <input id="sms" value="3000">
 <button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
 <button class="btn test" onclick="cmd('starttest '+v('sus')+' '+v('sms'))">Run</button>
+</div>
+<h2>Pump Manual Test (bench only, xả ra bình/ca, KHÔNG gắn engine)</h2><div class="row small">
+PWM us <input id="pus" value="1160"> Duration ms <input id="pms" value="1500">
+<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
+<button class="btn test" onclick="cmd('pumptest '+v('pus')+' '+v('pms'))">Run</button>
 </div>
 <h2>Event Log</h2><div class="log" id="logs"></div>
 </div><script>

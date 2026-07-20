@@ -622,13 +622,14 @@ valve1 on/off | valve2 on/off
 
 ```
 arm2
-pumptest 1210 1500   -> bơm chạy 1500ms ở 1210us, đo ml thực tế đối chiếu bảng calib
+pumptest 1160 1500   -> bơm chạy 1500ms ở 1160us, đo ml thực tế đối chiếu bảng calib
 ```
 
 > Trần bench `pumptest` hiện là **1000..1225µs**. Nút "Pump prime" trên Web UI
-> chạy ở `pumpTestUs` = **1210µs** (mặc định) — **tách riêng** khỏi `introFuelUs`
-> (dose mồi lúc light-off, giữ ~1160µs < idle) để không làm start thật quá giàu.
-> Vẫn nên quét vài mức us để xác nhận độ tuyến tính.
+> chạy ở `pumpTestUs` = **1160µs** (mặc định) — mức flow **thấp nhất đã đo thực
+> tế** (50 ml/phút), an toàn hơn cho bench test. Vẫn nên quét vài mức us khác
+> để xác nhận độ tuyến tính (dùng panel **"Pump Manual Test"** trên Web UI,
+> hoặc lệnh `pumptest <us> <ms>` trực tiếp qua Serial).
 >
 > **Các mức PWM này chỉnh trực tiếp được** (không hard-code): qua Serial
 > `set intro/idleus/maxus/pumptestus <us>` và `set purgeus/spinus/assistus <us>`,

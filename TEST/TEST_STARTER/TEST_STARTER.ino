@@ -323,8 +323,13 @@ void updateRpm() {
 const char* noiseVerdict() {
   if (!rpm.signalRecent && rpm.raw == 0) return "NO_SIGNAL";
   if (rpm.raw > 0 && rpm.accepted == 0)  return "NOISY";       // toàn xung rác bị lọc
-  if (rpm.rejectPct > 20.0f || rpm.jitterPct > 40.0f) return "NOISY";
-  if (rpm.rejectPct > 5.0f  || rpm.jitterPct > 15.0f) return "WARN";
+  // Ngay sau khi đổi PWM (SETTLING), period đang thay đổi thật (tăng/giảm ga)
+  // nên jitterPct tự nhiên rất cao dù không có xung giả nào - đây là quán tính
+  // cơ khí thật, không phải nhiễu điện. Chỉ dùng jitterPct để kết luận NOISY/WARN
+  // khi đã hết thời gian settle; rejectPct (xung bị loại thật sự) vẫn luôn tính.
+  bool settling = (millis() - pwmChangedAtMs < SETTLE_MS);
+  if (rpm.rejectPct > 20.0f || (!settling && rpm.jitterPct > 40.0f)) return "NOISY";
+  if (rpm.rejectPct > 5.0f  || (!settling && rpm.jitterPct > 15.0f)) return "WARN";
   return "CLEAN";
 }
 
@@ -587,7 +592,12 @@ void loop() {
   handleSerial();
   server.handleClient();
   updateRpm();
-  applyPwm();   // keep the starter ESC signal refreshed each loop
+  // KHONG goi applyPwm()/ledcWrite() moi vong lap: LEDC la PWM phan cung,
+  // tu phat song doc lap sau khi ledcWrite() duoc goi 1 lan (khac ESP32Servo,
+  // vi vay khong can "refresh" lien tuc). Goi lai khong can thiet moi vong
+  // lap co the chiem CPU/critical-section va nghi ngo la nguyen nhan gay
+  // tran cung ~25 xung/s quan sat duoc trong TEST_RPM_RAWCOUNT khi doi chieu
+  // voi DSO152. setPwm() da goi applyPwm() moi khi gia tri PWM thuc su doi.
 
   uint32_t nowMs = millis();
   if (nowMs - lastStatusMs >= STATUS_PRINT_MS) {
