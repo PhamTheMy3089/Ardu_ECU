@@ -742,23 +742,25 @@ arm2
 startidle
 ```
 
-Firmware tự chạy chuỗi (RPM-gated ignition):
-`SPINUP_RAMP → IGNITE → PREHEAT_FUEL → ACCEL_TO_IDLE → IDLING`
+Firmware tự chạy chuỗi:
+`PURGE → SPINUP_PREHEAT → INTRO_FUEL → LIGHTOFF → ACCEL_TO_IDLE → IDLING`
 
-- **SPINUP_RAMP**: starter tăng dần PWM `rampfromus`→`ramptous` (mặc định 1150→1300µs)
-  trong `startrampms` (mặc định 30s). Chưa glow, chưa nhiên liệu. Khi **RPM > `ignarmrpm`
-  (mặc định 3000)** → sang IGNITE. Nếu hết `spinuptimeoutms` mà RPM chưa đạt → abort `NO_IGNITION_RPM`.
-- **IGNITE**: **glow ON `ignonms` (3s) + tắt chờ `ignwaitms` (3s)**, lặp tối đa `ignattempts`
-  (3) lần. **Đạt EGT ≥ `ignitionThresholdC` (100°C) bất kỳ lúc nào = đánh lửa thành công.**
-  Hết 3 lần chưa đạt → abort `NO_IGNITION`. (Giai đoạn này **chưa phun nhiên liệu** — chỉ glow.)
-- **PREHEAT_FUEL** *(placeholder — mức nhiệt/nhiên liệu preheat sẽ tune sau)*: mở van khởi động
-  + bơm nhiên liệu mồi (`introus`), rồi chuyển ACCEL_TO_IDLE. Có thể thay điều kiện chuyển
-  bằng ngưỡng nhiệt preheat riêng khi bạn hoàn thiện.
-- **ACCEL_TO_IDLE**: bơm nhiên liệu vòng kín lên `idleRpm` (42000), nhả đề khi RPM ≥ `starterReleaseRpm`.
+- **PURGE**: starter ramp từ `rampfromus` (1150µs), **+1µs mỗi `rampstepms` (250ms ≈ 4µs/s)**,
+  tới khi **RPM > `ignarmrpm` (3000)** thì giữ `purgeTimeMs` (3s) thổi sạch. Quá `spinuptimeoutms`
+  không đạt RPM → abort `NO_RPM`.
+- **SPINUP_PREHEAT**: **glow ON `preheatMs` (2s)**, sau đó giữ glow bật.
+- **INTRO_FUEL**: bơm nhiên liệu min (`introus` = 1015µs) + mở **Start Valve (Valve 1)**.
+- **LIGHTOFF**: chờ `fueldelayms` (1s); xác nhận bắt lửa THẬT khi **EGT ≥ 100°C VÀ dEGT/dt ≥
+  `lightoffrise` (15°C/s) giữ `lightoffconfirmms` (0.7s)** → mở **Main Valve (Valve 2)**, chờ
+  `postIgnitionHeatMs` (2s), đóng Start Valve, chờ `flameprovems` (2s) xác nhận không mất lửa →
+  tắt glow, thành công. Quá `noIgnitionTimeoutMs` (6s) hoặc mất lửa → thất bại (blow-out `purgeoutms` rồi cooldown).
+- **ACCEL_TO_IDLE**: nếu lửa còn cháy mà RPM không tăng thì bơm +`accelstepus` mỗi `accelholdms`,
+  tới `idleRpm` (42000). Starter trợ lực bám RPM (`assistus`→`ramptous`=1450µs) tới `startermaxrpm`
+  (10000) rồi nhả.
+- **Mất lửa**: EGT tụt > `flameoutdropc` (10°C) trong 2s **hoặc** < 100°C.
 
-> Toàn bộ mốc trên chỉnh được trong **Web UI → Settings → "Tune — Start sequence"**
-> (hoặc lệnh Serial `set startrampms/rampfromus/ramptous/ignarmrpm/ignonms/ignwaitms/ignattempts`),
-> và lưu vào SD bằng nút "Lưu config vào SD".
+> Toàn bộ mốc trên chỉnh được trong **Web UI → Settings → "Tune — Start sequence"** và lưu vào SD.
+> Xem chi tiết trong `QUY_TRINH_KHOI_DONG.md`.
 
 ### Bảo vệ động cơ / starter (chạy mọi lúc, mọi mode)
 
@@ -767,7 +769,7 @@ Hai cơ cấu bảo vệ chạy mỗi vòng lặp, đè lên lệnh starter củ
 1. **Chống khí nóng lan lên đầu máy (soak-back)**: khi **EGT > `cooldownTargetC` (90°C)**
    mà **RPM < `hotSpinMinRpm` (3000)** → starter tự chạy, **bắt đầu ở `hotSpinUs` (1200µs,
    KHÔNG phải 1150µs như ramp lúc khởi động)** rồi **tăng dần +1µs mỗi 0.1s** cho tới khi
-   RPM vượt 3000 (giới hạn trần ở `ramptous` = 1300µs). Ramp nhẹ từ 1200 tránh làm cánh
+   RPM vượt 3000 (giới hạn trần ở `ramptous` = 1450µs). Ramp nhẹ từ 1200 tránh làm cánh
    quạt giảm tốc đột ngột khi guard vào cuộc; khi RPM đã đạt thì **giữ nguyên** mức xung
    (không tăng tiếp, không thả). Dùng cho trường hợp động cơ đang nóng mà dừng/tụt tua —
    giữ luồng khí đúng chiều, tránh khí nóng dội ngược làm hỏng đầu/ổ trước. Khi **EGT < 90°C**
