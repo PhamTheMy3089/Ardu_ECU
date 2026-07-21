@@ -141,7 +141,6 @@ static const uint32_t STARTER_PROVE_TIMEOUT_MS = 1500;
 // bench TEST_STARTER.ino observation that a fixed PWM settles within ~1-1.5s/step
 // but a full spin-up from OFF takes noticeably longer).
 static const uint32_t STARTER_TEST_SPIN_MS = 5000;
-static const uint32_t VALVE_TEST_TIMEOUT_MS = 10000;  // bench valve1/valve2 "on" auto-off window
 // Faster RPM-loss detection while fueled at running RPM (IDLING/OPERATING), so fuel
 // is cut promptly after a real flameout instead of waiting the full 1s signal timeout.
 static const uint32_t FUELED_RPM_LOSS_TIMEOUT_MS = 400;
@@ -332,7 +331,6 @@ bool stage2Armed = false;
 bool abortAcknowledged = false;  // must be set via clearabort before re-arm from ABORTED
 bool runStartedByButton = false; // true if the current run was started by the physical button (comm watchdog does not apply)
 uint32_t stage2ArmUntilMs = 0, manualIgnOffAtMs = 0, manualStartOffAtMs = 0;
-uint32_t manualValve1OffAtMs = 0, manualValve2OffAtMs = 0;  // bench valve-test auto-off timers
 uint32_t lastOperatorLinkMs = 0;  // last Serial/Web command or Web UI /api poll; feeds the comm watchdog
 String lastAbortReason = "NONE";
 String serialCmdBuf = "";  // non-blocking serial command accumulator
@@ -632,7 +630,7 @@ void fuelValvesAuto(bool on) {
   // main circuit alone carries fuel for the rest of IDLING/OPERATING.
   valve1Cmd = on && (ecuMode == MODE_STARTING);
 }
-void forceSafeOutputs() { fuelTargetRpm = 0; fuelTargetUs = ESC_SAFE_US; pumpUs = ESC_SAFE_US; startUs = ESC_SAFE_US; ignCmd = valve1Cmd = valve2Cmd = false; manualValve1OffAtMs = manualValve2OffAtMs = 0; applyOutputs(); }
+void forceSafeOutputs() { fuelTargetRpm = 0; fuelTargetUs = ESC_SAFE_US; pumpUs = ESC_SAFE_US; startUs = ESC_SAFE_US; ignCmd = valve1Cmd = valve2Cmd = false; applyOutputs(); }
 void enterMode(EcuMode m) {
   // Anchor the flameout grace to the FIRST stable idle of this run so it is not
   // re-armed by later IDLING<->OPERATING throttle toggles (which would mask a
@@ -717,7 +715,6 @@ void stage2Off() {
   }
   stage2Armed = false;
   manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0;
-  manualValve1OffAtMs = manualValve2OffAtMs = 0;
   activeTest = TEST_NONE; enterWaitingSafe(); addLog("SAFE OFF"); Serial.println("STAGE2 OFF: outputs safe.");
 }
 
@@ -1636,7 +1633,7 @@ void printChecklist() {
 
 bool requireArmAndIdleForTest(TestId id) {
   if (id == TEST_EGT || id == TEST_RPM_NOISE || id == TEST_KILL) return true;
-  if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first or press ARM in Web UI."); return false; }
+  // ARM no longer required for component tests (bench convenience); still WAITING/ABORTED-only.
   if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: component tests only while WAITING/ABORTED."); return false; }
   return true;
 }
@@ -2017,12 +2014,10 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <button class="btn test" onclick="cmd('test egt')">EGT</button><button class="btn test" onclick="cmd('test rpm_noise')">RPM noise</button><button class="btn test" onclick="cmd('test ign')">IGN</button><button class="btn test" onclick="cmd('test starter')">Starter</button><button class="btn test" onclick="cmd('test starter_ign')">Starter+IGN EMI</button><button class="btn test" onclick="cmd('test valve1')">Valve 1</button><button class="btn test" onclick="cmd('test valve2')">Valve 2</button><button class="btn test" onclick="cmd('test pump')">Pump prime</button><button class="btn test" onclick="cmd('confirmkill')">Confirm kill</button><button class="btn" onclick="cmd('resetcheck')">Reset checklist</button>
 </div><table><thead><tr><th>Step</th><th>Result</th><th>Note</th></tr></thead><tbody id="ck"></tbody></table>
 
-<h2>Manual Actuator Tests <span class="small">(bench; cần ARM 10s trước)</span></h2>
+<h2>Manual Actuator Tests <span class="small">(bench — không cần ARM)</span></h2>
 <div class="row small">Starter — PWM us <input id="sus" value="1200"> Duration ms <input id="sms" value="3000">
-<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
 <button class="btn test" onclick="cmd('starttest '+v('sus')+' '+v('sms'))">Run starter</button></div>
 <div class="row small">Pump (xả ra bình/ca, KHÔNG gắn engine) — PWM us <input id="pus" value="1160"> Duration ms <input id="pms" value="1500">
-<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
 <button class="btn test" onclick="cmd('pumptest '+v('pus')+' '+v('pms'))">Run pump</button></div>
 <div class="row small">Igniter/glow — Duration ms <input id="igms" value="1000">
 <button class="btn test" onclick="cmd('ignpulse '+v('igms'))">Pulse glow</button></div>
@@ -2032,7 +2027,7 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 &nbsp;&nbsp;Valve 2 (Main oil) —
 <button class="btn test" onclick="cmd('valve2 on')">ON</button>
 <button class="btn danger" onclick="cmd('valve2 off')">OFF</button>
-<span class="small">(auto-off 10s)</span></div>
+<span class="small">(không tự tắt — nhớ bấm OFF sau khi test)</span></div>
 </div><!-- /test -->
 
 <div class="panel" id="tab_set">
@@ -2271,7 +2266,6 @@ void beginAutoIdle() {
   activeTest = TEST_NONE; activeTestEndMs = 0;
   ignitionDetectedMs = 0;
   throttlePct = 0; lastAbortReason = "NONE"; starterAboveReleaseSinceMs = 0; manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0;
-  manualValve1OffAtMs = manualValve2OffAtMs = 0;
   // Fresh comm-watchdog window for the new run; assume a remote (Serial/Web) start
   // unless startIdleFromButton() flips this to a button run right after.
   lastOperatorLinkMs = millis();
@@ -2865,7 +2859,6 @@ void handleCommand(String cmd) {
   if (cmd == "startidle") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } String why; if (!canStartAutoIdle(why)) { Serial.print("START BLOCKED: "); Serial.println(why); return; } if (why != "OK") { Serial.print("START NOTICE: "); Serial.println(why); } beginAutoIdle(); return; }
 
   if (cmd.startsWith("ignpulse ")) {
-    if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; }
     if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: ignpulse only while WAITING/ABORTED."); return; }
     // Do not energize the igniter into a still-hot engine (e.g. ABORTED after a
     // cooldown timeout that expired while hot): residual fuel + a hot core is a
@@ -2880,7 +2873,6 @@ void handleCommand(String cmd) {
   }
 
   if (cmd.startsWith("starttest ")) {
-    if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; }
     if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: starttest only while WAITING/ABORTED."); return; }
     int us; uint32_t ms; if (!parseTwoInts(cmd, us, ms)) { Serial.println("ERROR: use starttest <us> <ms>"); return; }
     // Duration is not capped: bench manual test runs exactly the ms the user enters.
@@ -2890,7 +2882,6 @@ void handleCommand(String cmd) {
   }
 
   if (cmd.startsWith("pumptest ")) {
-    if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; }
     if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: pumptest only while WAITING/ABORTED."); return; }
 
     String args = cmd.substring(String("pumptest ").length());
@@ -2924,10 +2915,10 @@ void handleCommand(String cmd) {
     return;
   }
 
-  if (cmd == "valve1 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE1 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve1Cmd = true; manualValve1OffAtMs = millis() + VALVE_TEST_TIMEOUT_MS; applyOutputs(); Serial.println("VALVE1 ON (auto-off 10s)"); return; }
-  if (cmd == "valve1 off") { valve1Cmd = false; manualValve1OffAtMs = 0; applyOutputs(); Serial.println("VALVE1 OFF"); return; }
-  if (cmd == "valve2 on") { if (!isStage2Armed()) { Serial.println("ERROR: type arm2 first."); return; } if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE2 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve2Cmd = true; manualValve2OffAtMs = millis() + VALVE_TEST_TIMEOUT_MS; applyOutputs(); Serial.println("VALVE2 ON (auto-off 10s)"); return; }
-  if (cmd == "valve2 off") { valve2Cmd = false; manualValve2OffAtMs = 0; applyOutputs(); Serial.println("VALVE2 OFF"); return; }
+  if (cmd == "valve1 on") { if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE1 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve1Cmd = true; applyOutputs(); Serial.println("VALVE1 ON (no auto-off - turn off manually)"); return; }
+  if (cmd == "valve1 off") { valve1Cmd = false; applyOutputs(); Serial.println("VALVE1 OFF"); return; }
+  if (cmd == "valve2 on") { if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE2 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve2Cmd = true; applyOutputs(); Serial.println("VALVE2 ON (no auto-off - turn off manually)"); return; }
+  if (cmd == "valve2 off") { valve2Cmd = false; applyOutputs(); Serial.println("VALVE2 OFF"); return; }
 
   if (cmd.startsWith("set rpmfilter ")) {
     int f = numberAfter(cmd, "set rpmfilter ");
@@ -3076,8 +3067,6 @@ void loop() {
   if (manualIgnOffAtMs > 0 && millis() >= manualIgnOffAtMs) { ignCmd = false; manualIgnOffAtMs = 0; applyOutputs(); Serial.println("GLOW AUTO OFF."); }
   if (manualStartOffAtMs > 0 && millis() >= manualStartOffAtMs) { startUs = ESC_SAFE_US; manualStartOffAtMs = 0; applyOutputs(); Serial.println("STARTER AUTO OFF."); }
   if (manualPumpOffAtMs > 0 && millis() >= manualPumpOffAtMs) { pumpUs = ESC_SAFE_US; fuelTargetUs = ESC_SAFE_US; fuelValvesAuto(false); manualPumpOffAtMs = 0; applyOutputs(); Serial.println("PUMP AUTO OFF."); }
-  if (manualValve1OffAtMs > 0 && millis() >= manualValve1OffAtMs) { valve1Cmd = false; manualValve1OffAtMs = 0; applyOutputs(); Serial.println("VALVE1 AUTO OFF."); }
-  if (manualValve2OffAtMs > 0 && millis() >= manualValve2OffAtMs) { valve2Cmd = false; manualValve2OffAtMs = 0; applyOutputs(); Serial.println("VALVE2 AUTO OFF."); }
   updateActiveTest();
   isStage2Armed();
   updateRpm(); updateEgt();
