@@ -555,8 +555,8 @@ không cần lib ngoài (LEDC PWM có sẵn trong core).
 | `status` / `help` | In trạng thái / menu lệnh |
 
 > Firmware ECU chính có mục **"Starter Manual Test"** trên Web UI dashboard
-> cho phép chạy `starttest <us> <ms>` trực tiếp từ trình duyệt (cần `arm2`
-> trước, có nút riêng) — không bắt buộc phải dùng Serial.
+> cho phép chạy `starttest <us> <ms>` trực tiếp từ trình duyệt (không cần
+> arm2) — không bắt buộc phải dùng Serial.
 
 **Đọc dòng trạng thái** (in 2 lần/giây):
 ```
@@ -606,21 +606,16 @@ Quay tay đều ~1 vòng/giây → Serial phải hiện RPM ≈ 60 (ppr=1), `NOI
 
 ## Giai đoạn 3 — Test từng bộ phận (Test Wizard, KHÔNG nhiên liệu)
 
-Tất cả lệnh dưới cần `arm2` trước (khóa tự nhả sau 10 giây, phải làm ngay
-sau khi arm).
+Các lệnh test **không cần `arm2`** (đã bỏ yêu cầu ARM cho phần test, chỉ còn
+yêu cầu ở `startidle`/`autostart on`/tắt interlock — xem Giai đoạn 5).
 
 ```
-arm2
 test ign          -> glow plug bật 1s, quan sát dòng điện/nhiệt bằng tay (cẩn thận nóng)
-arm2
 test starter      -> starter quay 5s ở us cấu hình, xem RPM có tăng lên không
                      (RPM/RNOISE được chốt LÚC starter còn quay, ngay trước khi tắt —
                       tránh rest-guard ép RPM=0; 5s đủ để tốc độ ổn định, hết báo NOISY)
-arm2
 test starter_ign  -> starter + glow cùng lúc, kiểm tra EMI có làm nhiễu RPM không (resetRpmStats() trước bước này đã fix trong CODE_REVIEW_FINDINGS.md)
-arm2
 test valve1        -> Valve 1 = Start solenoid valve
-arm2
 test valve2        -> Valve 2 = Main oil valve
 ```
 
@@ -634,12 +629,16 @@ chỉnh firmware để né test).
 > Riêng `test starter` (chỉ starter) vẫn cho chạy vì giúp làm mát. Nếu test bị
 > `BLOCKED` do nóng, đợi nguội hoặc chạy tiếp cooldown trước khi test lại.
 
-**Component test khác (tùy chọn, bench-only)**:
+**Component test khác (tùy chọn, bench-only, không cần arm2)**:
 ```
 starttest <us> <ms>   -> vd: starttest 1200 3000
 ignpulse <ms>          -> vd: ignpulse 1500
 valve1 on/off | valve2 on/off
 ```
+
+> ⚠️ **`valve1 on`/`valve2 on` KHÔNG còn tự tắt sau 10s** — van sẽ mở cho tới
+> khi bạn gõ `valve1 off`/`valve2 off` (hoặc bấm nút OFF trên Web UI). Luôn
+> nhớ tắt van sau khi test xong, đặc biệt khi có nhiên liệu thật.
 
 ---
 
@@ -648,7 +647,6 @@ valve1 on/off | valve2 on/off
 ⚠️ Tháo ống dẫn nhiên liệu ra khỏi engine, xả vào cốc hứng riêng.
 
 ```
-arm2
 pumptest 1160 1500   -> bơm chạy 1500ms ở 1160us, đo ml thực tế đối chiếu bảng calib
 ```
 
