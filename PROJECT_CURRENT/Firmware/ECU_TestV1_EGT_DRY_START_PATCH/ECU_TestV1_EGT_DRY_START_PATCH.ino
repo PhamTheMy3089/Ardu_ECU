@@ -1954,7 +1954,7 @@ String webStatusJson() {
 
 String htmlPage() {
   return String(R"HTML(
-<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ECU Test V1</title>
 <style>
 body{margin:0;background:#0b1020;color:#e9eefc;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1100px;margin:auto;padding:16px}
@@ -2188,7 +2188,7 @@ setInterval(load,700);load();
 
 void setupWebServer() {
   if (webRoutesReady) return;
-  server.on("/", []() { server.send(200, "text/html", htmlPage()); });
+  server.on("/", []() { server.send(200, "text/html; charset=utf-8", htmlPage()); });
   server.on("/api", []() {
     // Only a poll from a VISIBLE dashboard tab counts as operator presence for the
     // comm watchdog. The page sends act=0 when hidden/backgrounded (phone locked,
