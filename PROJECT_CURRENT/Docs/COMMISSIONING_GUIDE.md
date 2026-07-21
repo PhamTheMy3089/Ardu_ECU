@@ -742,13 +742,45 @@ arm2
 startidle
 ```
 
-Firmware tự chạy chuỗi:
-`PURGE → SPINUP_PREHEAT (glow) → INTRO_FUEL (đánh lửa) → POST_IGNITION_HEAT
-→ ACCEL_TO_IDLE → IDLING`
+Firmware tự chạy chuỗi (RPM-gated ignition):
+`SPINUP_RAMP → IGNITE → PREHEAT_FUEL → ACCEL_TO_IDLE → IDLING`
 
-Theo dõi bằng `status` liên tục (auto in mỗi ~1s) hoặc Web UI:
+- **SPINUP_RAMP**: starter tăng dần PWM `rampfromus`→`ramptous` (mặc định 1150→1300µs)
+  trong `startrampms` (mặc định 30s). Chưa glow, chưa nhiên liệu. Khi **RPM > `ignarmrpm`
+  (mặc định 3000)** → sang IGNITE. Nếu hết `spinuptimeoutms` mà RPM chưa đạt → abort `NO_IGNITION_RPM`.
+- **IGNITE**: **glow ON `ignonms` (3s) + tắt chờ `ignwaitms` (3s)**, lặp tối đa `ignattempts`
+  (3) lần. **Đạt EGT ≥ `ignitionThresholdC` (100°C) bất kỳ lúc nào = đánh lửa thành công.**
+  Hết 3 lần chưa đạt → abort `NO_IGNITION`. (Giai đoạn này **chưa phun nhiên liệu** — chỉ glow.)
+- **PREHEAT_FUEL** *(placeholder — mức nhiệt/nhiên liệu preheat sẽ tune sau)*: mở van khởi động
+  + bơm nhiên liệu mồi (`introus`), rồi chuyển ACCEL_TO_IDLE. Có thể thay điều kiện chuyển
+  bằng ngưỡng nhiệt preheat riêng khi bạn hoàn thiện.
+- **ACCEL_TO_IDLE**: bơm nhiên liệu vòng kín lên `idleRpm` (42000), nhả đề khi RPM ≥ `starterReleaseRpm`.
+
+> Toàn bộ mốc trên chỉnh được trong **Web UI → Settings → "Tune — Start sequence"**
+> (hoặc lệnh Serial `set startrampms/rampfromus/ramptous/ignarmrpm/ignonms/ignwaitms/ignattempts`),
+> và lưu vào SD bằng nút "Lưu config vào SD".
+
+### Bảo vệ động cơ / starter (chạy mọi lúc, mọi mode)
+
+Hai cơ cấu bảo vệ chạy mỗi vòng lặp, đè lên lệnh starter của từng giai đoạn:
+
+1. **Chống khí nóng lan lên đầu máy (soak-back)**: khi **EGT > `cooldownTargetC` (90°C)**
+   mà **RPM < `hotSpinMinRpm` (3000)** → starter tự chạy, **bắt đầu ở `hotSpinUs` (1200µs,
+   KHÔNG phải 1150µs như ramp lúc khởi động)** rồi **tăng dần +1µs mỗi 0.1s** cho tới khi
+   RPM vượt 3000 (giới hạn trần ở `ramptous` = 1300µs). Ramp nhẹ từ 1200 tránh làm cánh
+   quạt giảm tốc đột ngột khi guard vào cuộc; khi RPM đã đạt thì **giữ nguyên** mức xung
+   (không tăng tiếp, không thả). Dùng cho trường hợp động cơ đang nóng mà dừng/tụt tua —
+   giữ luồng khí đúng chiều, tránh khí nóng dội ngược làm hỏng đầu/ổ trước. Khi **EGT < 90°C**
+   starter được phép dừng (cooldown cũng kết thúc ở mốc này) và ramp hot-spin reset về 1200µs.
+2. **Chống quá tải starter**: khi **RPM > `starterMaxRpm` (15000)** → starter bị **tắt**
+   (nhả khỏi cánh quạt) để rotor đã lên tua không kéo quá tải/quá tốc motor đề.
+
+Chỉnh trong **Web UI → Settings → "Bảo vệ động cơ / starter"** (hoặc `set startermaxrpm`,
+`set hotspinminrpm`, `set hotspinus`, `set cooltarget`), lưu vào SD như các tham số khác.
+
+Theo dõi bằng Web UI (gauge RPM/EGT + chip STAGE) hoặc `status`:
 - `STAGE=` chuyển đúng thứ tự trên
-- `EGT=` tăng dần khi có lửa
+- `EGT=` tăng qua 100°C khi bắt lửa
 - `RPM=` tăng dần đến gần idleRpm
 
 Nếu bất kỳ đâu bị **ABORT** (OVER_TEMP, NO_IGNITION, NO_RPM_RISE,

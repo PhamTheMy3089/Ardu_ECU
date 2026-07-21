@@ -205,6 +205,17 @@ struct Config {
   int fuelConfirmRpm = 18000;
   int starterProveMinRpm = 500;
 
+  // ---- Engine/starter protection (applied every loop in all modes) ----
+  // (1) Hot soak-back guard: while EGT > cooldownTargetC (the "hot" threshold, 90C),
+  //     keep RPM >= hotSpinMinRpm by running the starter at hotSpinUs, so a hot engine
+  //     that has stopped/slowed does not let hot gas creep forward and damage the front.
+  //     Below that EGT the starter may stop.
+  // (2) Starter overspeed: above starterMaxRpm force the starter OFF (disengage) so the
+  //     spun-up impeller cannot overload/over-spin the starter motor.
+  int starterMaxRpm = 15000;   // starter forced OFF above this RPM
+  int hotSpinMinRpm = 3000;    // minimum RPM held while hot
+  int hotSpinUs     = 1200;    // starter PWM used to hold hotSpinMinRpm while hot
+
   uint32_t purgeTimeMs = 3000;
   uint32_t preheatMs = 2500;
   uint32_t noIgnitionTimeoutMs = 6000;
@@ -212,6 +223,21 @@ struct Config {
   uint32_t postIgnitionHeatMs = 1500;
   uint32_t starterReleaseHoldMs = 1500;
   uint32_t idleStabilizeMs = 2000;
+
+  // ---- RPM-gated ignition start sequence (new) ----
+  // Starter ramps startRampFromUs -> startRampToUs over startRampMs. Ignition attempts
+  // begin once RPM exceeds ignArmRpm. Each attempt = glow ON for ignOnMs then OFF for
+  // ignWaitMs; ignition is confirmed if EGT reaches ignitionThresholdC anytime during
+  // the on/wait window. Up to ignMaxAttempts attempts, then abort. (No fuel is dumped
+  // during ignition attempts - fuel/preheat happens in ST_PREHEAT_FUEL afterwards.)
+  uint32_t startRampMs      = 30000; // starter ramp duration
+  int      startRampFromUs  = 1150;  // starter PWM at ramp start
+  int      startRampToUs    = 1300;  // starter PWM at ramp end
+  int      ignArmRpm        = 3000;  // begin ignition attempts above this RPM
+  uint32_t ignOnMs          = 3000;  // glow ON per attempt
+  uint32_t ignWaitMs        = 3000;  // glow OFF wait per attempt (EGT still watched)
+  uint8_t  ignMaxAttempts   = 3;     // ignition attempts before abort
+  uint32_t spinupRpmTimeoutMs = 35000; // abort if RPM never reaches ignArmRpm within this
 
   // Safety patch: do not stay in ACCEL_TO_IDLE forever.
   // If idle RPM is not reached within this window, fuel/ignition are cut and cooldown starts.
@@ -221,7 +247,7 @@ struct Config {
   // Fuel, valves and igniter remain OFF while starter gently moves air through the engine.
   uint32_t cooldownMinMs = 5000;
   uint32_t cooldownTimeoutMs = 45000;
-  int cooldownTargetC = 120;
+  int cooldownTargetC = 90;   // also the "engine hot" threshold for the soak-back guard
   int cooldownStarterUs = 1100;
 
   // Comm watchdog: while fueled (IDLING/OPERATING), the operator must prove the
@@ -262,11 +288,21 @@ struct Config {
 } cfg;
 
 enum EcuMode : uint8_t { MODE_WAITING, MODE_STARTING, MODE_IDLING, MODE_OPERATING, MODE_COOLDOWN, MODE_ABORTED };
-enum StartStage : uint8_t { ST_NONE, ST_PURGE, ST_SPINUP_PREHEAT, ST_INTRO_FUEL, ST_POST_IGNITION_HEAT, ST_ACCEL_TO_IDLE };
+// Start stages (RPM-gated ignition sequence):
+//  SPINUP_RAMP  - starter ramps 1150->1300us; wait until RPM > ignArmRpm
+//  IGNITE       - glow ON 3s / OFF 3s, up to 3 attempts; success when EGT >= 100C
+//  PREHEAT_FUEL - open start valve + fuel to preheat (placeholder, to be tuned)
+//  ACCEL_TO_IDLE- fuel closed-loop up to idle, release starter
+enum StartStage : uint8_t { ST_NONE, ST_SPINUP_RAMP, ST_IGNITE, ST_PREHEAT_FUEL, ST_ACCEL_TO_IDLE };
 
 EcuMode ecuMode = MODE_WAITING;
 StartStage startStage = ST_NONE;
 uint32_t modeEnteredMs = 0, stageEnteredMs = 0, starterAboveReleaseSinceMs = 0, lastPumpStepMs = 0;
+uint32_t startRampBeganMs = 0;    // starter-ramp anchor (spans SPINUP_RAMP + IGNITE)
+uint32_t ignAttemptBeganMs = 0;   // current ignition attempt start
+uint8_t  ignAttempt = 0;          // ignition attempts used this start
+int      hotSpinCurUs = 0;        // current hot soak-back starter PWM (ramps 1200us +1us/0.1s); 0 = not spinning
+uint32_t hotSpinLastStepMs = 0;   // last hot-spin ramp step time
 uint32_t runningSinceMs = 0;  // first time stable IDLING was reached this run; NOT reset by IDLING<->OPERATING toggles (flameout grace anchor)
 uint32_t rpmStatsResetAtMs = 0;  // last resetRpmStats(); RPM_SIGNAL_LOST is suppressed briefly after so a reset can't look like signal loss
 uint32_t ignitionDetectedMs = 0;  // set when EGT crosses ignition threshold; anchors the post-ignition RPM-rise check
@@ -457,7 +493,7 @@ bool btnActionDone = false;
 
 void writeActiveDigital(uint8_t pin, bool on, bool activeHigh) { digitalWrite(pin, (on == activeHigh) ? HIGH : LOW); }
 const char* modeName(EcuMode m) { switch(m){case MODE_WAITING:return "WAITING";case MODE_STARTING:return "STARTING";case MODE_IDLING:return "IDLING";case MODE_OPERATING:return "OPERATING";case MODE_COOLDOWN:return "COOLDOWN";case MODE_ABORTED:return "ABORTED";default:return "UNKNOWN";} }
-const char* stageName(StartStage s) { switch(s){case ST_NONE:return "NONE";case ST_PURGE:return "PURGE";case ST_SPINUP_PREHEAT:return "SPINUP_PREHEAT";case ST_INTRO_FUEL:return "INTRO_FUEL";case ST_POST_IGNITION_HEAT:return "POST_IGN_HEAT";case ST_ACCEL_TO_IDLE:return "ACCEL_TO_IDLE";default:return "UNKNOWN";} }
+const char* stageName(StartStage s) { switch(s){case ST_NONE:return "NONE";case ST_SPINUP_RAMP:return "SPINUP_RAMP";case ST_IGNITE:return "IGNITE";case ST_PREHEAT_FUEL:return "PREHEAT_FUEL";case ST_ACCEL_TO_IDLE:return "ACCEL_TO_IDLE";default:return "UNKNOWN";} }
 const char* rpmNoiseName(RpmNoiseLevel n) {
   switch (n) {
     case RPM_CLEAN: return "CLEAN";
@@ -1348,6 +1384,17 @@ bool saveConfigToSd() {
   f.print("checklist=");    f.println(cfg.requireChecklistForStart ? 1 : 0);
   f.print("egtdry=");       f.println(cfg.allowDryStartWhenEgtFault ? 1 : 0);
   f.print("sdlog=");        f.println(cfg.sdLoggingEnabled ? 1 : 0);
+  f.print("startrampms=");  f.println(cfg.startRampMs);
+  f.print("rampfromus=");   f.println(cfg.startRampFromUs);
+  f.print("ramptous=");     f.println(cfg.startRampToUs);
+  f.print("ignarmrpm=");    f.println(cfg.ignArmRpm);
+  f.print("ignonms=");      f.println(cfg.ignOnMs);
+  f.print("ignwaitms=");    f.println(cfg.ignWaitMs);
+  f.print("ignattempts=");  f.println((int)cfg.ignMaxAttempts);
+  f.print("spinuptimeoutms=");f.println(cfg.spinupRpmTimeoutMs);
+  f.print("startermaxrpm=");f.println(cfg.starterMaxRpm);
+  f.print("hotspinminrpm=");f.println(cfg.hotSpinMinRpm);
+  f.print("hotspinus=");    f.println(cfg.hotSpinUs);
   f.close();
   cfgFileOnSd = true;
   Serial.println("SAVECFG: OK -> /ECUCFG.TXT");
@@ -1387,6 +1434,17 @@ void applyConfigKV(const String& key, const String& val) {
   else if (key == "checklist")    cfg.requireChecklistForStart = (n != 0);
   else if (key == "egtdry")       cfg.allowDryStartWhenEgtFault = (n != 0);
   else if (key == "sdlog")        cfg.sdLoggingEnabled = (n != 0);
+  else if (key == "startrampms")  cfg.startRampMs = (uint32_t)clampCfgInt(n, 3000, 120000);
+  else if (key == "rampfromus")   cfg.startRampFromUs = clampCfgInt(n, 1000, 1300);
+  else if (key == "ramptous")     cfg.startRampToUs = clampCfgInt(n, 1000, 1500);
+  else if (key == "ignarmrpm")    cfg.ignArmRpm = clampCfgInt(n, 500, 60000);
+  else if (key == "ignonms")      cfg.ignOnMs = (uint32_t)clampCfgInt(n, 500, 20000);
+  else if (key == "ignwaitms")    cfg.ignWaitMs = (uint32_t)clampCfgInt(n, 0, 20000);
+  else if (key == "ignattempts")  cfg.ignMaxAttempts = (uint8_t)clampCfgInt(n, 1, 10);
+  else if (key == "spinuptimeoutms") cfg.spinupRpmTimeoutMs = (uint32_t)clampCfgInt(n, 5000, 180000);
+  else if (key == "startermaxrpm") cfg.starterMaxRpm = clampCfgInt(n, 5000, 60000);
+  else if (key == "hotspinminrpm") cfg.hotSpinMinRpm = clampCfgInt(n, 0, 20000);
+  else if (key == "hotspinus")    cfg.hotSpinUs = clampCfgInt(n, 1000, 1400);
 }
 
 // Load /ECUCFG.TXT (if present) and apply it, clamping every value to its valid
@@ -1414,6 +1472,7 @@ bool loadConfigFromSd() {
   // Re-assert cross-field invariants (same as the interactive set-commands enforce).
   if (cfg.maxFuelUs < cfg.idleFuelUs) cfg.maxFuelUs = cfg.idleFuelUs;
   if (cfg.maxRpm < cfg.idleRpm + 5000) cfg.maxRpm = cfg.idleRpm + 5000;
+  if (cfg.startRampToUs < cfg.startRampFromUs) cfg.startRampToUs = cfg.startRampFromUs;
   cfgLoadedFromSd = (applied > 0);
   Serial.print("LOADCFG: applied "); Serial.print(applied); Serial.println(" keys from /ECUCFG.TXT");
   if (applied > 0) addLog("CONFIG LOADED from SD");
@@ -1775,7 +1834,7 @@ String webStatusJson() {
   String ckWhy;
   bool ckOk = checklistPassedForAutoStart(ckWhy);
   String s;
-  s.reserve(4096);  // pre-size for the worst-case payload (status + checklist + 16 long logs + full cfg) to avoid heap churn per /api poll
+  s.reserve(4608);  // pre-size for the worst-case payload (status + checklist + 16 long logs + full cfg) to avoid heap churn per /api poll
   s = "{";
   s += "\"mode\":\"" + String(modeName(ecuMode)) + "\",";
   s += "\"stage\":\"" + String(stageName(startStage)) + "\",";
@@ -1815,6 +1874,18 @@ String webStatusJson() {
   s += "\"cfgIdleUs\":\"" + String(cfg.idleFuelUs) + "\",";
   s += "\"cfgMaxUs\":\"" + String(cfg.maxFuelUs) + "\",";
   s += "\"cfgPumpTestUs\":\"" + String(cfg.pumpTestUs) + "\",";
+  // New RPM-gated ignition start-sequence params
+  s += "\"cfgStartRampMs\":\"" + String(cfg.startRampMs) + "\",";
+  s += "\"cfgRampFromUs\":\"" + String(cfg.startRampFromUs) + "\",";
+  s += "\"cfgRampToUs\":\"" + String(cfg.startRampToUs) + "\",";
+  s += "\"cfgIgnArmRpm\":\"" + String(cfg.ignArmRpm) + "\",";
+  s += "\"cfgIgnOnMs\":\"" + String(cfg.ignOnMs) + "\",";
+  s += "\"cfgIgnWaitMs\":\"" + String(cfg.ignWaitMs) + "\",";
+  s += "\"cfgIgnAttempts\":\"" + String((int)cfg.ignMaxAttempts) + "\",";
+  s += "\"cfgSpinupTimeoutMs\":\"" + String(cfg.spinupRpmTimeoutMs) + "\",";
+  s += "\"cfgStarterMaxRpm\":\"" + String(cfg.starterMaxRpm) + "\",";
+  s += "\"cfgHotSpinMinRpm\":\"" + String(cfg.hotSpinMinRpm) + "\",";
+  s += "\"cfgHotSpinUs\":\"" + String(cfg.hotSpinUs) + "\",";
   // RPM sensor + safety + timing config, so every Web UI tune input auto-populates
   // from the live config (no terminal needed).
   s += "\"cfgRpmTol\":\"" + String(cfg.rpmTolerance) + "\",";
@@ -1966,6 +2037,29 @@ Max us <input id="maxus" value="1260"><button class="btn" onclick="cmd('set maxu
 Pump test us <input id="pumptestus" value="1160"><button class="btn" onclick="cmd('set pumptestus '+v('pumptestus'))">Set</button>
 </div>
 
+<h2>Tune — Start sequence (ramp + đánh lửa)</h2>
+<div class="small">Starter ramp từ "ramp from"→"ramp to" trong "ramp ms". Khi RPM &gt; "ign arm RPM" thì đánh lửa: glow ON "ign on"ms + chờ "ign wait"ms, tối đa "attempts" lần; đạt EGT ≥ Max-EGT-ignition (100°C) là thành công.</div>
+<div class="row small">
+Ramp ms <input id="startrampms" value="30000"><button class="btn" onclick="cmd('set startrampms '+v('startrampms'))">Set</button>
+Ramp from us <input id="rampfromus" value="1150"><button class="btn" onclick="cmd('set rampfromus '+v('rampfromus'))">Set</button>
+Ramp to us <input id="ramptous" value="1300"><button class="btn" onclick="cmd('set ramptous '+v('ramptous'))">Set</button>
+</div><div class="row small">
+Ign arm RPM <input id="ignarmrpm" value="3000"><button class="btn" onclick="cmd('set ignarmrpm '+v('ignarmrpm'))">Set</button>
+Ign on ms <input id="ignonms" value="3000"><button class="btn" onclick="cmd('set ignonms '+v('ignonms'))">Set</button>
+Ign wait ms <input id="ignwaitms" value="3000"><button class="btn" onclick="cmd('set ignwaitms '+v('ignwaitms'))">Set</button>
+</div><div class="row small">
+Attempts <input id="ignattempts" value="3"><button class="btn" onclick="cmd('set ignattempts '+v('ignattempts'))">Set</button>
+Spinup timeout ms <input id="spinuptimeoutms" value="35000"><button class="btn" onclick="cmd('set spinuptimeoutms '+v('spinuptimeoutms'))">Set</button>
+</div>
+
+<h2>Bảo vệ động cơ / starter</h2>
+<div class="small">EGT &gt; Cool target (90°C) mà RPM &lt; "hot spin min" thì starter tự chạy (chống khí nóng lan lên đầu máy khi động cơ nóng dừng). RPM &gt; "starter max" thì starter tắt (chống quá tải starter).</div>
+<div class="row small">
+Starter max RPM <input id="startermaxrpm" value="15000"><button class="btn" onclick="cmd('set startermaxrpm '+v('startermaxrpm'))">Set</button>
+Hot spin min RPM <input id="hotspinminrpm" value="3000"><button class="btn" onclick="cmd('set hotspinminrpm '+v('hotspinminrpm'))">Set</button>
+Hot spin us <input id="hotspinus" value="1200"><button class="btn" onclick="cmd('set hotspinus '+v('hotspinus'))">Set</button>
+</div>
+
 <details><summary><b>Advanced — Timing, cooldown &amp; interlocks</b></summary>
 <div class="row small">
 Accel ms <input id="accelms" value="200"><button class="btn" onclick="cmd('set accelms '+v('accelms'))">Set</button>
@@ -2032,6 +2126,9 @@ function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).t
  setInp('rpmfilter',d.cfgRpmFilter);
  setInp('purgeus',d.cfgPurgeUs);setInp('spinus',d.cfgSpinUs);setInp('assistus',d.cfgAssistUs);
  setInp('introus',d.cfgIntroUs);setInp('idleus',d.cfgIdleUs);setInp('maxus',d.cfgMaxUs);setInp('pumptestus',d.cfgPumpTestUs);
+ setInp('startrampms',d.cfgStartRampMs);setInp('rampfromus',d.cfgRampFromUs);setInp('ramptous',d.cfgRampToUs);
+ setInp('ignarmrpm',d.cfgIgnArmRpm);setInp('ignonms',d.cfgIgnOnMs);setInp('ignwaitms',d.cfgIgnWaitMs);setInp('ignattempts',d.cfgIgnAttempts);setInp('spinuptimeoutms',d.cfgSpinupTimeoutMs);
+ setInp('startermaxrpm',d.cfgStarterMaxRpm);setInp('hotspinminrpm',d.cfgHotSpinMinRpm);setInp('hotspinus',d.cfgHotSpinUs);
  setInp('accelms',d.cfgAccelMs);setInp('decelms',d.cfgDecelMs);setInp('lowaccelms',d.cfgLowAccelMs);setInp('lowdecelms',d.cfgLowDecelMs);
  setInp('drystartms',d.cfgDryStartMs);setInp('acceltoidlems',d.cfgAccelToIdleMs);
  setInp('cooltarget',d.cfgCoolTarget);setInp('coolstarter',d.cfgCoolStarter);setInp('coolminms',d.cfgCoolMinMs);setInp('cooltimeoutms',d.cfgCoolTimeoutMs);
@@ -2136,8 +2233,10 @@ void beginAutoIdle() {
   lastOperatorLinkMs = millis();
   runStartedByButton = false;
   fuelTargetUs = ESC_SAFE_US;
-  forceSafeOutputs(); enterMode(MODE_STARTING); enterStage(ST_PURGE);
-  startUs = cfg.starterPurgeUs; pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false); applyOutputs();
+  startRampBeganMs = millis(); ignAttempt = 0; ignAttemptBeganMs = 0;
+  resetRpmStats();   // clean RPM window before the ramp measures the ign-arm crossing
+  forceSafeOutputs(); enterMode(MODE_STARTING); enterStage(ST_SPINUP_RAMP);
+  startUs = cfg.startRampFromUs; pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false); applyOutputs();
 
   if (dryStartActive) {
     addLog("DRY START: EGT fault, fuel/valves/ign OFF");
@@ -2146,8 +2245,18 @@ void beginAutoIdle() {
     Serial.println("). PUMP, VALVES and IGN are forced OFF. This will NOT start the engine.");
   } else {
     addLog("AUTO-IDLE START");
-    Serial.println("AUTO-IDLE START: entering PURGE");
+    Serial.println("AUTO-IDLE START: entering SPINUP_RAMP (starter ramp 1150->1300us)");
   }
+}
+
+// Starter PWM during the ramp: linearly startRampFromUs -> startRampToUs over
+// startRampMs (measured from startRampBeganMs, so it keeps climbing through the
+// IGNITE stage too), then holds at startRampToUs.
+int starterRampUs() {
+  uint32_t el = millis() - startRampBeganMs;
+  if (el >= cfg.startRampMs) return cfg.startRampToUs;
+  long span = (long)cfg.startRampToUs - (long)cfg.startRampFromUs;
+  return cfg.startRampFromUs + (int)(span * (long)el / (long)cfg.startRampMs);
 }
 
 void updateDryStarting() {
@@ -2160,30 +2269,21 @@ void updateDryStarting() {
   fuelValvesAuto(false);
 
   switch (startStage) {
-    case ST_PURGE:
-      startUs = cfg.starterPurgeUs;
-      if (millis() - stageEnteredMs >= cfg.purgeTimeMs) {
-        resetRpmStats();
-        enterStage(ST_SPINUP_PREHEAT);
-        Serial.println("DRY START STAGE -> SPINUP_RPM_TEST");
-      }
-      break;
-
-    case ST_SPINUP_PREHEAT:
-      startUs = cfg.starterSpinUs;
+    case ST_SPINUP_RAMP:
+      startUs = starterRampUs();
       if (cfg.requireRpmForStart && millis() - stageEnteredMs > STARTER_PROVE_TIMEOUT_MS &&
           (!rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS) || rpmData.rpm < cfg.starterProveMinRpm)) {
         abortAll("DRY_NO_STARTER_RPM");
         return;
       }
-      if (millis() - stageEnteredMs >= cfg.preheatMs) {
+      if (millis() - startRampBeganMs >= cfg.startRampMs) {
         enterStage(ST_ACCEL_TO_IDLE);
-        Serial.println("DRY START STAGE -> RUN_STARTER_ASSIST");
+        Serial.println("DRY START STAGE -> RUN_STARTER (ramp done)");
       }
       break;
 
     case ST_ACCEL_TO_IDLE:
-      startUs = cfg.starterAssistUs;
+      startUs = cfg.startRampToUs;
       if (millis() - stageEnteredMs >= cfg.dryStartRunMs) {
         Serial.print("DRY START COMPLETE -> WAITING. RPM=");
         Serial.print(rpmData.rpm, 0);
@@ -2201,9 +2301,8 @@ void updateDryStarting() {
 
 bool checkPostIgnitionRpmRise() {
   // After light-off, RPM must climb past fuelConfirmRpm within fuelConfirmTimeoutMs.
-  // Anchored on ignitionDetectedMs so it spans POST_IGNITION_HEAT and ACCEL_TO_IDLE,
-  // instead of living inside ST_INTRO_FUEL where the shorter NO_IGNITION timeout
-  // always fired first and made it dead code. Returns true after aborting.
+  // Anchored on ignitionDetectedMs so it spans PREHEAT_FUEL and ACCEL_TO_IDLE.
+  // Returns true after aborting.
   if (!cfg.requireRpmForStart) return false;
   if (ignitionDetectedMs == 0) return false;
   if (millis() - ignitionDetectedMs < cfg.fuelConfirmTimeoutMs) return false;
@@ -2218,24 +2317,49 @@ void updateStarting() {
     return;
   }
   switch (startStage) {
-    case ST_PURGE:
-      startUs = cfg.starterPurgeUs; pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false);
-      if (millis() - stageEnteredMs >= cfg.purgeTimeMs) { resetRpmStats(); enterStage(ST_SPINUP_PREHEAT); Serial.println("START STAGE -> SPINUP_PREHEAT"); }
-      break;
-    case ST_SPINUP_PREHEAT:
-      startUs = cfg.starterSpinUs; pumpUs = ESC_SAFE_US; ignCmd = true; fuelValvesAuto(false);
+    case ST_SPINUP_RAMP:
+      // Starter ramps startRampFromUs -> startRampToUs over startRampMs. No fuel, no
+      // glow. Begin ignition attempts once RPM crosses ignArmRpm.
+      startUs = starterRampUs(); pumpUs = ESC_SAFE_US; ignCmd = false; fuelValvesAuto(false);
       if (cfg.requireRpmForStart && millis() - stageEnteredMs > STARTER_PROVE_TIMEOUT_MS && (!rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS) || rpmData.rpm < cfg.starterProveMinRpm)) { abortAll("NO_STARTER_RPM"); return; }
-      if (millis() - stageEnteredMs >= cfg.preheatMs) { enterStage(ST_INTRO_FUEL); Serial.println("START STAGE -> INTRO_FUEL"); }
+      if (rpmMeasurementUsable() && rpmData.rpm >= (float)cfg.ignArmRpm) {
+        ignAttempt = 0; ignAttemptBeganMs = millis();
+        enterStage(ST_IGNITE); Serial.print("START STAGE -> IGNITE (RPM="); Serial.print(rpmData.rpm, 0); Serial.println(")");
+        return;
+      }
+      // Never reached ignition RPM within the ramp (+grace) -> abort.
+      if (millis() - startRampBeganMs >= cfg.spinupRpmTimeoutMs) { abortAll("NO_IGNITION_RPM"); return; }
       break;
-    case ST_INTRO_FUEL:
-      startUs = cfg.starterSpinUs; ignCmd = true; fuelValvesAuto(true); setFuelTargetUs(cfg.introFuelUs); stepPumpToward(fuelTargetUs, cfg.lowAccelStepDelayMs, cfg.lowDecelStepDelayMs);
-      if (egt.ok && egt.c >= cfg.ignitionThresholdC) { ignitionDetectedMs = millis(); enterStage(ST_POST_IGNITION_HEAT); Serial.println("IGNITION DETECTED by EGT threshold."); return; }
-      if (millis() - stageEnteredMs >= cfg.noIgnitionTimeoutMs) { abortAll("NO_IGNITION"); return; }
+    case ST_IGNITE: {
+      // Glow-ONLY ignition attempts (no fuel dumped here). Each attempt: glow ON for
+      // ignOnMs then OFF for ignWaitMs. Success = EGT reaches ignitionThresholdC any
+      // time during the window. Up to ignMaxAttempts, then abort.
+      startUs = starterRampUs(); pumpUs = ESC_SAFE_US; fuelValvesAuto(false);
+      uint32_t inAttempt = millis() - ignAttemptBeganMs;
+      ignCmd = (inAttempt < cfg.ignOnMs);   // ON then OFF within each attempt
+      if (egt.ok && egt.c >= (float)cfg.ignitionThresholdC) {
+        ignitionDetectedMs = millis(); ignCmd = false;
+        enterStage(ST_PREHEAT_FUEL);
+        Serial.print("IGNITION OK (EGT="); Serial.print(egt.c, 0); Serial.print("C, attempt "); Serial.print(ignAttempt + 1); Serial.println(")");
+        return;
+      }
+      if (inAttempt >= cfg.ignOnMs + cfg.ignWaitMs) {
+        ignAttempt++;
+        if (ignAttempt >= cfg.ignMaxAttempts) { abortAll("NO_IGNITION"); return; }
+        ignAttemptBeganMs = millis();
+        Serial.print("IGNITE retry, attempt "); Serial.println(ignAttempt + 1);
+      }
       break;
-    case ST_POST_IGNITION_HEAT:
-      startUs = cfg.starterAssistUs; ignCmd = true; fuelValvesAuto(true); setFuelTargetUs(max(fuelTargetUs, cfg.idleFuelUs)); stepPumpToward(fuelTargetUs, cfg.lowAccelStepDelayMs, cfg.lowDecelStepDelayMs);
+    }
+    case ST_PREHEAT_FUEL:
+      // TODO(user): preheat fuel/temperature to be defined ("mức nhiệt preheat để
+      // đánh giá và bổ sung sau"). Placeholder: open start valve + intro fuel, glow
+      // off, then hand over to ACCEL_TO_IDLE. Tune introFuelUs / postIgnitionHeatMs
+      // (or replace the time-based transition with a preheat-temperature criterion).
+      startUs = starterRampUs(); ignCmd = false; fuelValvesAuto(true);
+      setFuelTargetUs(cfg.introFuelUs); stepPumpToward(fuelTargetUs, cfg.lowAccelStepDelayMs, cfg.lowDecelStepDelayMs);
       if (checkPostIgnitionRpmRise()) return;
-      if (millis() - stageEnteredMs >= cfg.postIgnitionHeatMs) { ignCmd = false; enterStage(ST_ACCEL_TO_IDLE); Serial.println("START STAGE -> ACCEL_TO_IDLE"); }
+      if (millis() - stageEnteredMs >= cfg.postIgnitionHeatMs) { enterStage(ST_ACCEL_TO_IDLE); Serial.println("PREHEAT_FUEL -> ACCEL_TO_IDLE"); }
       break;
     case ST_ACCEL_TO_IDLE: {
       fuelValvesAuto(true); ignCmd = false;
@@ -2312,6 +2436,37 @@ void updateCooldown() {
   }
 
   startUs = constrain(cfg.cooldownStarterUs, ESC_SAFE_US, ESC_MAX_US);
+}
+
+// Engine/starter protection, evaluated every loop AFTER the mode logic sets startUs
+// and BEFORE applyOutputs(), so it authoritatively overrides the per-mode starter
+// command in every state (starting, running, cooldown, aborted, waiting).
+void applyStarterProtection() {
+  bool rpmOk = rpmMeasurementUsable();
+  // (2) Starter overspeed: above starterMaxRpm force the starter OFF so the spun-up
+  //     impeller cannot overload/over-spin the starter motor. Wins over the hot guard.
+  if (rpmOk && rpmData.rpm >= (float)cfg.starterMaxRpm) { startUs = ESC_SAFE_US; hotSpinCurUs = 0; return; }
+  // (1) Hot soak-back guard: while EGT is above the hot threshold (cooldownTargetC)
+  //     and RPM is below hotSpinMinRpm, spin the starter - starting at hotSpinUs
+  //     (1200us, NOT the 1150us ramp floor) and ramping up +1us every 100ms until RPM
+  //     clears the target. The gentle ramp-from-1200 avoids a sudden impeller
+  //     deceleration when the guard engages. Held (not increased) once RPM is OK.
+  bool hot = egt.ok && egt.c > (float)cfg.cooldownTargetC;
+  bool belowTarget = (!rpmOk || rpmData.rpm < (float)cfg.hotSpinMinRpm);
+  if (hot && belowTarget) {
+    uint32_t now = millis();
+    if (hotSpinCurUs < cfg.hotSpinUs) { hotSpinCurUs = cfg.hotSpinUs; hotSpinLastStepMs = now; }  // engage at floor
+    else if (now - hotSpinLastStepMs >= 100 && hotSpinCurUs < cfg.startRampToUs) {                 // +1us / 0.1s, capped
+      hotSpinLastStepMs = now; hotSpinCurUs += 1;
+    }
+    if (startUs < hotSpinCurUs) startUs = hotSpinCurUs;
+  } else if (hot) {
+    // Hot but RPM already OK: hold the last hot-spin PWM (don't drop the impeller).
+    if (hotSpinCurUs > 0 && startUs < hotSpinCurUs) startUs = hotSpinCurUs;
+  } else {
+    // Cooled below threshold: release the hot-spin ramp so it restarts at 1200us next time.
+    hotSpinCurUs = 0; hotSpinLastStepMs = millis();
+  }
 }
 
 void checkFailures() {
@@ -2399,6 +2554,9 @@ void printConfig() {
   Serial.print("accel/decel ms="); Serial.print(cfg.accelStepDelayMs); Serial.print("/"); Serial.print(cfg.decelStepDelayMs);
   Serial.print(" low="); Serial.print(cfg.lowAccelStepDelayMs); Serial.print("/"); Serial.println(cfg.lowDecelStepDelayMs);
   Serial.print("starter purge/spin/assist us="); Serial.print(cfg.starterPurgeUs); Serial.print("/"); Serial.print(cfg.starterSpinUs); Serial.print("/"); Serial.println(cfg.starterAssistUs);
+  Serial.print("start ramp: "); Serial.print(cfg.startRampFromUs); Serial.print("->"); Serial.print(cfg.startRampToUs); Serial.print("us over "); Serial.print(cfg.startRampMs); Serial.println("ms");
+  Serial.print("ignite: armRpm="); Serial.print(cfg.ignArmRpm); Serial.print(" on="); Serial.print(cfg.ignOnMs); Serial.print("ms wait="); Serial.print(cfg.ignWaitMs); Serial.print("ms x"); Serial.print((int)cfg.ignMaxAttempts); Serial.print(" (success EGT>="); Serial.print(cfg.ignitionThresholdC); Serial.println("C)");
+  Serial.print("protection: starter OFF above "); Serial.print(cfg.starterMaxRpm); Serial.print(" rpm; while EGT>"); Serial.print(cfg.cooldownTargetC); Serial.print("C hold rpm>="); Serial.print(cfg.hotSpinMinRpm); Serial.print(" via starter@"); Serial.print(cfg.hotSpinUs); Serial.println("us");
   Serial.print("introFuelUs="); Serial.print(cfg.introFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.introFuelUs), 1); Serial.println(" ml/min)");
   Serial.print("idleFuelUs="); Serial.print(cfg.idleFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.idleFuelUs), 1); Serial.println(" ml/min)");
   Serial.print("maxFuelUs="); Serial.print(cfg.maxFuelUs); Serial.print(" (~"); Serial.print(flowFromUs(cfg.maxFuelUs), 1); Serial.println(" ml/min)");
@@ -2434,6 +2592,7 @@ void printHelp() {
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
   Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us> | set pumptestus <us>");
   Serial.println("set purgeus <us> | set spinus <us> | set assistus <us> -> starter crank PWM (1000..1500)");
+  Serial.println("set startrampms/rampfromus/ramptous | set ignarmrpm/ignonms/ignwaitms/ignattempts/spinuptimeoutms -> RPM-gated ignition start seq");
   Serial.println("  (all PWM/limit tuning: intro/idleus/maxus/pumptestus/purgeus/spinus/assistus/idlerpm/maxrpm/rpmtol/maxegt/maxgrad only in WAITING/ABORTED)");
   Serial.println("set idlerpm <rpm> | set maxrpm <rpm> | set rpmtol <rpm> | set maxegt <C> | set maxgrad <C/s>");
   Serial.println("set acceltoidlems <ms> | set cooldownms <minMs> <timeoutMs> | set cooltarget <C> | set coolstarter <us>");
@@ -2682,7 +2841,11 @@ void handleCommand(String cmd) {
   if ((cmd.startsWith("set intro ") || cmd.startsWith("set idleus ") || cmd.startsWith("set maxus ") ||
        cmd.startsWith("set purgeus ") || cmd.startsWith("set spinus ") || cmd.startsWith("set assistus ") ||
        cmd.startsWith("set idlerpm ") || cmd.startsWith("set maxrpm ") || cmd.startsWith("set rpmtol ") ||
-       cmd.startsWith("set maxegt ") || cmd.startsWith("set maxgrad ") || cmd.startsWith("set pumptestus ")) &&
+       cmd.startsWith("set maxegt ") || cmd.startsWith("set maxgrad ") || cmd.startsWith("set pumptestus ") ||
+       cmd.startsWith("set startrampms ") || cmd.startsWith("set rampfromus ") || cmd.startsWith("set ramptous ") ||
+       cmd.startsWith("set ignarmrpm ") || cmd.startsWith("set ignonms ") || cmd.startsWith("set ignwaitms ") ||
+       cmd.startsWith("set ignattempts ") || cmd.startsWith("set spinuptimeoutms ") ||
+       cmd.startsWith("set startermaxrpm ") || cmd.startsWith("set hotspinminrpm ") || cmd.startsWith("set hotspinus ")) &&
       ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) {
     Serial.println("ERROR: PWM/limit tuning only in WAITING/ABORTED (not while running).");
     return;
@@ -2694,6 +2857,17 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set purgeus ")) { int us = numberAfter(cmd, "set purgeus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: purgeus 1000..1500"); return; } cfg.starterPurgeUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set spinus ")) { int us = numberAfter(cmd, "set spinus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: spinus 1000..1500"); return; } cfg.starterSpinUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set assistus ")) { int us = numberAfter(cmd, "set assistus "); if (us < 1000 || us > 1500) { Serial.println("ERROR: assistus 1000..1500"); return; } cfg.starterAssistUs = us; Serial.println("OK"); return; }
+  if (cmd.startsWith("set startrampms ")) { int v = numberAfter(cmd, "set startrampms "); if (v < 3000 || v > 120000) { Serial.println("ERROR: startrampms 3000..120000"); return; } cfg.startRampMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set rampfromus ")) { int us = numberAfter(cmd, "set rampfromus "); if (us < 1000 || us > 1300) { Serial.println("ERROR: rampfromus 1000..1300"); return; } cfg.startRampFromUs = us; if (cfg.startRampToUs < us) cfg.startRampToUs = us; Serial.println("OK"); return; }
+  if (cmd.startsWith("set ramptous ")) { int us = numberAfter(cmd, "set ramptous "); if (us < 1000 || us > 1500) { Serial.println("ERROR: ramptous 1000..1500"); return; } cfg.startRampToUs = max(us, cfg.startRampFromUs); Serial.println("OK"); return; }
+  if (cmd.startsWith("set ignarmrpm ")) { int r = numberAfter(cmd, "set ignarmrpm "); if (r < 500 || r > 60000) { Serial.println("ERROR: ignarmrpm 500..60000"); return; } cfg.ignArmRpm = r; Serial.println("OK"); return; }
+  if (cmd.startsWith("set ignonms ")) { int v = numberAfter(cmd, "set ignonms "); if (v < 500 || v > 20000) { Serial.println("ERROR: ignonms 500..20000"); return; } cfg.ignOnMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set ignwaitms ")) { int v = numberAfter(cmd, "set ignwaitms "); if (v < 0 || v > 20000) { Serial.println("ERROR: ignwaitms 0..20000"); return; } cfg.ignWaitMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set ignattempts ")) { int v = numberAfter(cmd, "set ignattempts "); if (v < 1 || v > 10) { Serial.println("ERROR: ignattempts 1..10"); return; } cfg.ignMaxAttempts = (uint8_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set spinuptimeoutms ")) { int v = numberAfter(cmd, "set spinuptimeoutms "); if (v < 5000 || v > 180000) { Serial.println("ERROR: spinuptimeoutms 5000..180000"); return; } cfg.spinupRpmTimeoutMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set startermaxrpm ")) { int r = numberAfter(cmd, "set startermaxrpm "); if (r < 5000 || r > 60000) { Serial.println("ERROR: startermaxrpm 5000..60000"); return; } cfg.starterMaxRpm = r; Serial.println("OK"); return; }
+  if (cmd.startsWith("set hotspinminrpm ")) { int r = numberAfter(cmd, "set hotspinminrpm "); if (r < 0 || r > 20000) { Serial.println("ERROR: hotspinminrpm 0..20000"); return; } cfg.hotSpinMinRpm = r; Serial.println("OK"); return; }
+  if (cmd.startsWith("set hotspinus ")) { int us = numberAfter(cmd, "set hotspinus "); if (us < 1000 || us > 1400) { Serial.println("ERROR: hotspinus 1000..1400"); return; } cfg.hotSpinUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set idlerpm ")) { int r = numberAfter(cmd, "set idlerpm "); if (r < 10000 || r > 60000) { Serial.println("ERROR: idlerpm 10000..60000"); return; } if (r > cfg.maxRpm - 5000) { Serial.println("ERROR: idlerpm must be <= maxRpm-5000"); return; } cfg.idleRpm = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set maxrpm ")) { int r = numberAfter(cmd, "set maxrpm "); if (r < cfg.idleRpm + 5000 || r > 160000) { Serial.println("ERROR: maxrpm must be idleRpm+5000..160000"); return; } cfg.maxRpm = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set rpmtol ")) { int r = numberAfter(cmd, "set rpmtol "); if (r < 500 || r > 15000) { Serial.println("ERROR: rpmtol 500..15000"); return; } cfg.rpmTolerance = r; Serial.println("OK"); return; }
@@ -2789,6 +2963,7 @@ void loop() {
     default: abortAll("INVALID_MODE"); break;
   }
   checkFailures();
+  applyStarterProtection();   // hot soak-back floor + starter overspeed cutoff (all modes)
   applyOutputs();
   updateStatusLed();
   updateSdTelemetry();
