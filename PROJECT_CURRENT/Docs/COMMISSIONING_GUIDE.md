@@ -750,9 +750,11 @@ startidle
 Firmware tự chạy chuỗi:
 `PURGE → SPINUP_PREHEAT → INTRO_FUEL → LIGHTOFF → ACCEL_TO_IDLE → IDLING`
 
-- **PURGE**: starter ramp từ `rampfromus` (1150µs), **+1µs mỗi `rampstepms` (250ms ≈ 4µs/s)**,
+- **PURGE**: starter giữ nguyên `rampfromus` (1150µs) trong `purgestablems` (**10s**)
+  cho ổn định trước, sau đó mới ramp **+1µs mỗi `rampstepms` (250ms ≈ 4µs/s)**,
   tới khi **RPM > `ignarmrpm` (3000)** thì giữ `purgeTimeMs` (3s) thổi sạch. Quá `spinuptimeoutms`
-  không đạt RPM → abort `NO_RPM`.
+  (55s, đã cộng sẵn 10s ổn định) không đạt RPM → abort `NO_RPM`. Áp dụng cho cả dry
+  test lẫn chạy thật (dùng chung hàm ramp).
 - **SPINUP_PREHEAT**: **glow ON `preheatMs` (2s)**, sau đó giữ glow bật.
 - **INTRO_FUEL**: bơm nhiên liệu min (`introus` = 1015µs) + mở **Start Valve (Valve 1)**.
 - **LIGHTOFF**: chờ `fueldelayms` (1s); xác nhận bắt lửa THẬT khi **EGT ≥ 100°C VÀ dEGT/dt ≥
