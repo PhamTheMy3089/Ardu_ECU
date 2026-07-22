@@ -19,11 +19,18 @@
 > (SoftAP `ECU_TestV1` / `admin1234`). Các lệnh Serial vẫn còn hoạt động như
 > phương án dự phòng, nhưng không bắt buộc dùng.
 >
-> Giao diện web chia **3 tab**:
+> Giao diện web chia **4 tab**:
 > - **▶ Run** — điều khiển (ARM / START IDLE / AutoStart / SOFT STOP / SAFE OFF /
 >   CLEAR ABORT / RPM RESET), chế độ EGT, và các thẻ trạng thái chi tiết.
 > - **🧪 Testing** — Test Wizard (9 bước + checklist) và Manual Actuator Test
->   (starter / pump / glow / valve1 / valve2).
+>   **có thời lượng** (starter/pump chạy đúng số ms nhập vào rồi tự tắt, ignpulse
+>   glow có giới hạn thời gian) — dùng để test nhanh, có kiểm soát thời gian.
+> - **🔧 Manual** — điều khiển tay **giữ nguyên tới khi tự tắt** (không có thời
+>   lượng): starter (`startmanual <us>`/`off`), pump (`pumpmanual <us>`/`off`,
+>   tự mở Valve 1), glow (`ign on`/`off`), Valve 1, Valve 2 — kèm nút
+>   **"🛑 SAFE OFF — TẮT HẾT NGAY"** và vài thẻ trạng thái (RPM/EGT/Starter/
+>   Pump/IGN/Valve) ngay trên tab để không phải chuyển qua Run. Dùng khi cần
+>   giữ 1 cơ cấu chạy liên tục để quan sát (đo dòng, đo nhiệt, canh chỉnh...).
 > - **⚙ Settings** — toàn bộ tham số tune + lưu/nạp config, mục **"Advanced"**
 >   (timing/cooldown/interlock) mở/gập được.
 >

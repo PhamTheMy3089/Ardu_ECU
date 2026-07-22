@@ -1987,6 +1987,7 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <div class="tabs">
 <button class="tabb on" id="btab_run" onclick="tab('run')">▶ Run</button>
 <button class="tabb" id="btab_test" onclick="tab('test')">🧪 Testing</button>
+<button class="tabb" id="btab_man" onclick="tab('man')">🔧 Manual</button>
 <button class="tabb" id="btab_set" onclick="tab('set')">⚙ Settings</button>
 </div>
 
@@ -2029,6 +2030,38 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <button class="btn danger" onclick="cmd('valve2 off')">OFF</button>
 <span class="small">(không tự tắt — nhớ bấm OFF sau khi test)</span></div>
 </div><!-- /test -->
+
+<div class="panel" id="tab_man">
+<h2>Điều khiển tay (Manual) <span class="small">— giữ nguyên tới khi bạn tắt, không tự động</span></h2>
+<div class="btns"><button class="btn danger" onclick="cmd('off')">🛑 SAFE OFF — TẮT HẾT NGAY</button></div>
+
+<h3>Starter</h3>
+<div class="row small">PWM us <input id="manSus" value="1200">
+<button class="btn go" onclick="cmd('startmanual '+v('manSus'))">Giữ chạy</button>
+<button class="btn danger" onclick="cmd('startmanual off')">Dừng</button></div>
+
+<h3>Pump <span class="small">(xả ra bình/ca, KHÔNG gắn engine)</span></h3>
+<div class="row small">PWM us <input id="manPus" value="1160">
+<button class="btn go" onclick="cmd('pumpmanual '+v('manPus'))">Giữ chạy</button>
+<button class="btn danger" onclick="cmd('pumpmanual off')">Dừng</button></div>
+
+<h3>Glow plug</h3>
+<div class="row small">
+<button class="btn go" onclick="cmd('ign on')">ON</button>
+<button class="btn danger" onclick="cmd('ign off')">OFF</button></div>
+
+<h3>Valve 1 (Start solenoid)</h3>
+<div class="row small">
+<button class="btn go" onclick="cmd('valve1 on')">ON</button>
+<button class="btn danger" onclick="cmd('valve1 off')">OFF</button></div>
+
+<h3>Valve 2 (Main oil)</h3>
+<div class="row small">
+<button class="btn go" onclick="cmd('valve2 on')">ON</button>
+<button class="btn danger" onclick="cmd('valve2 off')">OFF</button></div>
+
+<div class="grid" id="cardsMan"></div>
+</div><!-- /man -->
 
 <div class="panel" id="tab_set">
 <h2>Config trên thẻ SD</h2>
@@ -2136,7 +2169,7 @@ function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,
 function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
 function setInp(id,val){var e=document.getElementById(id);if(e&&val!==undefined&&document.activeElement!==e)e.value=val;}
 function txt(id,val){var e=document.getElementById(id);if(e&&val!==undefined)e.textContent=val;}
-function tab(n){['run','test','set'].forEach(function(t){
+function tab(n){['run','test','man','set'].forEach(function(t){
  document.getElementById('tab_'+t).classList.toggle('on',t==n);
  document.getElementById('btab_'+t).classList.toggle('on',t==n);});}
 function gauge(arc,tid,val,max,warnFrac){
@@ -2158,6 +2191,8 @@ function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).t
   (abn?chip('ABORT',d.abort,'fail'):'');
  let cards=[['RPM',d.rpm],['EGT',d.egt],['dEGT',d.degt],['RPM Target',d.rtgt],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['Throttle',d.thr],['SD',d.sd]];
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
+ let cardsMan=[['RPM',d.rpm],['EGT',d.egt],['Starter',d.start],['Pump',d.pump],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2]];
+ document.getElementById('cardsMan').innerHTML=cardsMan.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
  document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
  setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('rpmtol',d.cfgRpmTol);setInp('maxegt',d.cfgMaxEgt);setInp('maxgrad',d.cfgMaxGrad);
  setInp('rpmfilter',d.cfgRpmFilter);
@@ -2700,6 +2735,9 @@ void printHelp() {
   Serial.println("ignpulse 500..3000    -> glow ON ms then auto OFF");
   Serial.println("starttest us ms       -> starter test, e.g. starttest 1100 3000");
   Serial.println("pumptest us [ms]      -> bench pump verify only, auto-off after ms (default 1500ms, no cap)");
+  Serial.println("startmanual us | startmanual off  -> hold starter PWM (no auto-off, manual page)");
+  Serial.println("pumpmanual us | pumpmanual off    -> hold pump PWM + open valve1 (no auto-off, manual page)");
+  Serial.println("ign on | ign off                  -> hold glow (no auto-off, manual page)");
   Serial.println("valve1 on/off (Start solenoid, bench-only) | valve2 on/off (Main oil valve, bench-only)");
   Serial.println("startidle             -> guarded auto-idle start sequence");
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
@@ -2914,6 +2952,47 @@ void handleCommand(String cmd) {
     Serial.println(" ms, then AUTO OFF");
     return;
   }
+
+  // ---- Manual page: continuous holds (no duration, no auto-off) for starter/pump/glow,
+  // paralleling how valve1/valve2 on/off already work. Stop with the matching "off".
+  if (cmd.startsWith("startmanual ")) {
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: startmanual only while WAITING/ABORTED."); return; }
+    String arg = cmd.substring(String("startmanual ").length()); arg.trim();
+    if (arg == "off") { startUs = ESC_SAFE_US; manualStartOffAtMs = 0; applyOutputs(); Serial.println("STARTER MANUAL OFF."); return; }
+    int us = arg.toInt();
+    if (us < 1000 || us > 1300) { Serial.println("ERROR: startmanual us 1000..1300 (or 'startmanual off')"); return; }
+    startUs = us; manualStartOffAtMs = 0; applyOutputs();
+    Serial.print("STARTER MANUAL HOLD at "); Serial.print(us); Serial.println("us (no auto-off - 'startmanual off' to stop)");
+    return;
+  }
+
+  if (cmd.startsWith("pumpmanual ")) {
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: pumpmanual only while WAITING/ABORTED."); return; }
+    String arg = cmd.substring(String("pumpmanual ").length()); arg.trim();
+    if (arg == "off") { pumpUs = ESC_SAFE_US; fuelTargetUs = ESC_SAFE_US; fuelValvesAuto(false); manualPumpOffAtMs = 0; applyOutputs(); Serial.println("PUMP MANUAL OFF."); return; }
+    int us = arg.toInt();
+    if (us < 1000 || us > 1225) { Serial.println("ERROR: pumpmanual us 1000..1225 (or 'pumpmanual off')"); return; }
+    if (fuelCommandBlockedByHotEgt()) {
+      Serial.print("PUMPMANUAL BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
+      Serial.print("C > cooldown target "); Serial.print(cfg.cooldownTargetC); Serial.println("C).");
+      return;
+    }
+    pumpUs = us; fuelTargetUs = us; fuelValvesAuto(true); manualPumpOffAtMs = 0; applyOutputs();
+    Serial.print("PUMP MANUAL HOLD at "); Serial.print(us); Serial.print("us ~"); Serial.print(flowFromUs(us), 1);
+    Serial.println(" ml/min (no auto-off - 'pumpmanual off' to stop)");
+    return;
+  }
+
+  if (cmd == "ign on") {
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: ign only while WAITING/ABORTED."); return; }
+    if (fuelCommandBlockedByHotEgt()) {
+      Serial.print("IGN BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C).");
+      return;
+    }
+    ignCmd = true; manualIgnOffAtMs = 0; applyOutputs(); Serial.println("GLOW ON (no auto-off - 'ign off' to stop).");
+    return;
+  }
+  if (cmd == "ign off") { ignCmd = false; manualIgnOffAtMs = 0; applyOutputs(); Serial.println("GLOW OFF."); return; }
 
   if (cmd == "valve1 on") { if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE1 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve1Cmd = true; applyOutputs(); Serial.println("VALVE1 ON (no auto-off - turn off manually)"); return; }
   if (cmd == "valve1 off") { valve1Cmd = false; applyOutputs(); Serial.println("VALVE1 OFF"); return; }
