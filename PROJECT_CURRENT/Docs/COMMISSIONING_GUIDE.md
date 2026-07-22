@@ -750,11 +750,13 @@ startidle
 Firmware tự chạy chuỗi:
 `PURGE → SPINUP_PREHEAT → INTRO_FUEL → LIGHTOFF → ACCEL_TO_IDLE → IDLING`
 
-- **PURGE**: starter giữ nguyên `rampfromus` (1150µs) trong `purgestablems` (**10s**)
-  cho ổn định trước, sau đó mới ramp **+1µs mỗi `rampstepms` (250ms ≈ 4µs/s)**,
-  tới khi **RPM > `ignarmrpm` (3000)** thì giữ `purgeTimeMs` (3s) thổi sạch. Quá `spinuptimeoutms`
-  (55s, đã cộng sẵn 10s ổn định) không đạt RPM → abort `NO_RPM`. Áp dụng cho cả dry
-  test lẫn chạy thật (dùng chung hàm ramp).
+- **PURGE**: starter giữ **ESC_SAFE (1000µs, thật sự 0)** trong `escarmholdms`
+  (**2s**) đầu để ESC arm xong trước khi nhận xung khác 0 (tránh "quay vài vòng rồi
+  khựng" do ESC mới arm được một phần), rồi giữ nguyên `rampfromus` (1150µs) trong
+  `purgestablems` (**10s**) cho ổn định, sau đó mới ramp **+1µs mỗi `rampstepms`
+  (250ms ≈ 4µs/s)**, tới khi **RPM > `ignarmrpm` (3000)** thì giữ `purgeTimeMs` (3s)
+  thổi sạch. Quá `spinuptimeoutms` (57s, đã cộng sẵn 2s arm-hold + 10s ổn định) không
+  đạt RPM → abort `NO_RPM`. Áp dụng cho cả dry test lẫn chạy thật (dùng chung hàm ramp).
 - **SPINUP_PREHEAT**: **glow ON `preheatMs` (2s)**, sau đó giữ glow bật.
 - **INTRO_FUEL**: bơm nhiên liệu min (`introus` = 1015µs) + mở **Start Valve (Valve 1)**.
 - **LIGHTOFF**: chờ `fueldelayms` (1s); xác nhận bắt lửa THẬT khi **EGT ≥ 100°C VÀ dEGT/dt ≥
