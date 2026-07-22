@@ -238,8 +238,19 @@ struct Config {
   int      startRampFromUs   = 1150; // PURGE ramp start
   int      startRampToUs     = 1450; // starter-assist MAX PWM (also PURGE ramp cap)
   uint32_t startRampStepMs   = 250;  // ramp +1us per this many ms (250 -> 4us/s, i.e. 2us/0.5s)
+  // PURGE PWM has 3 phases, in order (starterRampUs()):
+  //  Phase 1: escArmHoldMs at ESC_SAFE_US (1000us, genuinely zero) so the ESC finishes its
+  //     own arm sequence before any non-zero throttle is applied - jumping straight to
+  //     startRampFromUs right after forceSafeOutputs() can leave the ESC only partially
+  //     armed, which looks like "spins a couple turns then stalls/stutters".
+  //  Phase 2: purgeStableMs held steady at startRampFromUs, so the starter settles into a
+  //     stable spin before the PWM starts changing.
+  //  Phase 3: ramp +1us per startRampStepMs, capped at startRampToUs.
+  // (Applies to both dry test and a real start, since starterRampUs() is shared by both.)
+  uint32_t escArmHoldMs      = 2000;  // ESC arm hold at ESC_SAFE_US before any throttle
+  uint32_t purgeStableMs     = 10000; // steady-hold at startRampFromUs before ramping
   int      ignArmRpm         = 3000; // "spun up" RPM: purge done / start fuel above this
-  uint32_t spinupRpmTimeoutMs = 45000; // abort if RPM never reaches ignArmRpm within this
+  uint32_t spinupRpmTimeoutMs = 57000; // abort if RPM never reaches ignArmRpm within this (includes escArmHoldMs + purgeStableMs)
   uint32_t fuelDelayMs       = 1000; // LIGHTOFF: wait for fuel to reach the chamber
   // Real light-off (not just glow heating the thermocouple past the threshold): require
   // EGT >= ignitionThresholdC AND EGT rising at >= lightOffMinRiseCps, held continuously
@@ -1405,6 +1416,8 @@ bool saveConfigToSd() {
   f.print("rampfromus=");   f.println(cfg.startRampFromUs);
   f.print("ramptous=");     f.println(cfg.startRampToUs);
   f.print("rampstepms=");   f.println(cfg.startRampStepMs);
+  f.print("escarmholdms="); f.println(cfg.escArmHoldMs);
+  f.print("purgestablems=");f.println(cfg.purgeStableMs);
   f.print("ignarmrpm=");    f.println(cfg.ignArmRpm);
   f.print("spinuptimeoutms=");f.println(cfg.spinupRpmTimeoutMs);
   f.print("fueldelayms=");  f.println(cfg.fuelDelayMs);
@@ -1460,6 +1473,8 @@ void applyConfigKV(const String& key, const String& val) {
   else if (key == "rampfromus")   cfg.startRampFromUs = clampCfgInt(n, 1000, 1400);
   else if (key == "ramptous")     cfg.startRampToUs = clampCfgInt(n, 1000, 1500);
   else if (key == "rampstepms")   cfg.startRampStepMs = (uint32_t)clampCfgInt(n, 10, 5000);
+  else if (key == "escarmholdms") cfg.escArmHoldMs = (uint32_t)clampCfgInt(n, 0, 10000);
+  else if (key == "purgestablems")cfg.purgeStableMs = (uint32_t)clampCfgInt(n, 0, 60000);
   else if (key == "ignarmrpm")    cfg.ignArmRpm = clampCfgInt(n, 500, 60000);
   else if (key == "spinuptimeoutms") cfg.spinupRpmTimeoutMs = (uint32_t)clampCfgInt(n, 5000, 180000);
   else if (key == "fueldelayms")  cfg.fuelDelayMs = (uint32_t)clampCfgInt(n, 0, 20000);
@@ -1906,6 +1921,8 @@ String webStatusJson() {
   s += "\"cfgRampFromUs\":\"" + String(cfg.startRampFromUs) + "\",";
   s += "\"cfgRampToUs\":\"" + String(cfg.startRampToUs) + "\",";
   s += "\"cfgRampStepMs\":\"" + String(cfg.startRampStepMs) + "\",";
+  s += "\"cfgEscArmHoldMs\":\"" + String(cfg.escArmHoldMs) + "\",";
+  s += "\"cfgPurgeStableMs\":\"" + String(cfg.purgeStableMs) + "\",";
   s += "\"cfgIgnArmRpm\":\"" + String(cfg.ignArmRpm) + "\",";
   s += "\"cfgSpinupTimeoutMs\":\"" + String(cfg.spinupRpmTimeoutMs) + "\",";
   s += "\"cfgFuelDelayMs\":\"" + String(cfg.fuelDelayMs) + "\",";
@@ -1987,6 +2004,7 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <div class="tabs">
 <button class="tabb on" id="btab_run" onclick="tab('run')">▶ Run</button>
 <button class="tabb" id="btab_test" onclick="tab('test')">🧪 Testing</button>
+<button class="tabb" id="btab_man" onclick="tab('man')">🔧 Manual</button>
 <button class="tabb" id="btab_set" onclick="tab('set')">⚙ Settings</button>
 </div>
 
@@ -2030,6 +2048,38 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <span class="small">(không tự tắt — nhớ bấm OFF sau khi test)</span></div>
 </div><!-- /test -->
 
+<div class="panel" id="tab_man">
+<h2>Điều khiển tay (Manual) <span class="small">— giữ nguyên tới khi bạn tắt, không tự động</span></h2>
+<div class="btns"><button class="btn danger" onclick="cmd('off')">🛑 SAFE OFF — TẮT HẾT NGAY</button></div>
+
+<h3>Starter</h3>
+<div class="row small">PWM us <input id="manSus" value="1200">
+<button class="btn go" onclick="cmd('startmanual '+v('manSus'))">Giữ chạy</button>
+<button class="btn danger" onclick="cmd('startmanual off')">Dừng</button></div>
+
+<h3>Pump <span class="small">(xả ra bình/ca, KHÔNG gắn engine)</span></h3>
+<div class="row small">PWM us <input id="manPus" value="1160">
+<button class="btn go" onclick="cmd('pumpmanual '+v('manPus'))">Giữ chạy</button>
+<button class="btn danger" onclick="cmd('pumpmanual off')">Dừng</button></div>
+
+<h3>Glow plug</h3>
+<div class="row small">
+<button class="btn go" onclick="cmd('ign on')">ON</button>
+<button class="btn danger" onclick="cmd('ign off')">OFF</button></div>
+
+<h3>Valve 1 (Start solenoid)</h3>
+<div class="row small">
+<button class="btn go" onclick="cmd('valve1 on')">ON</button>
+<button class="btn danger" onclick="cmd('valve1 off')">OFF</button></div>
+
+<h3>Valve 2 (Main oil)</h3>
+<div class="row small">
+<button class="btn go" onclick="cmd('valve2 on')">ON</button>
+<button class="btn danger" onclick="cmd('valve2 off')">OFF</button></div>
+
+<div class="grid" id="cardsMan"></div>
+</div><!-- /man -->
+
 <div class="panel" id="tab_set">
 <h2>Config trên thẻ SD</h2>
 <div class="row small">File trên SD: <b id="cfgOnSd">-</b> · nạp lúc boot: <b id="cfgLoaded">-</b></div>
@@ -2069,11 +2119,13 @@ Pump test us <input id="pumptestus" value="1160"><button class="btn" onclick="cm
 </div>
 
 <h2>Tune — Start sequence</h2>
-<div class="small">PURGE: starter ramp từ "ramp from", +1µs mỗi "ramp step ms", tới khi RPM &gt; "ign arm RPM", giữ (purge dwell = Advanced). LIGHTOFF thành công khi EGT ≥ 100°C VÀ dEGT/dt ≥ "lightoff rise" giữ "lightoff confirm ms". Mất lửa: EGT tụt &gt; "flameout drop" trong 2s hoặc &lt;100°C.</div>
+<div class="small">PURGE: starter giữ ESC_SAFE ("arm hold ms") cho ESC arm xong, rồi giữ nguyên "ramp from" trong "purge stable ms" cho starter ổn định, rồi mới tăng +1µs mỗi "ramp step ms", tới khi RPM &gt; "ign arm RPM", giữ (purge dwell = Advanced). LIGHTOFF thành công khi EGT ≥ 100°C VÀ dEGT/dt ≥ "lightoff rise" giữ "lightoff confirm ms". Mất lửa: EGT tụt &gt; "flameout drop" trong 2s hoặc &lt;100°C.</div>
 <div class="row small">
 Ramp from us <input id="rampfromus" value="1150"><button class="btn" onclick="cmd('set rampfromus '+v('rampfromus'))">Set</button>
 Ramp to us (assist max) <input id="ramptous" value="1450"><button class="btn" onclick="cmd('set ramptous '+v('ramptous'))">Set</button>
 Ramp step ms <input id="rampstepms" value="250"><button class="btn" onclick="cmd('set rampstepms '+v('rampstepms'))">Set</button>
+ESC arm hold ms <input id="escarmholdms" value="2000"><button class="btn" onclick="cmd('set escarmholdms '+v('escarmholdms'))">Set</button>
+Purge stable ms <input id="purgestablems" value="10000"><button class="btn" onclick="cmd('set purgestablems '+v('purgestablems'))">Set</button>
 </div><div class="row small">
 Ign arm RPM <input id="ignarmrpm" value="3000"><button class="btn" onclick="cmd('set ignarmrpm '+v('ignarmrpm'))">Set</button>
 Spinup timeout ms <input id="spinuptimeoutms" value="45000"><button class="btn" onclick="cmd('set spinuptimeoutms '+v('spinuptimeoutms'))">Set</button>
@@ -2136,7 +2188,7 @@ function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,
 function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
 function setInp(id,val){var e=document.getElementById(id);if(e&&val!==undefined&&document.activeElement!==e)e.value=val;}
 function txt(id,val){var e=document.getElementById(id);if(e&&val!==undefined)e.textContent=val;}
-function tab(n){['run','test','set'].forEach(function(t){
+function tab(n){['run','test','man','set'].forEach(function(t){
  document.getElementById('tab_'+t).classList.toggle('on',t==n);
  document.getElementById('btab_'+t).classList.toggle('on',t==n);});}
 function gauge(arc,tid,val,max,warnFrac){
@@ -2158,12 +2210,14 @@ function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).t
   (abn?chip('ABORT',d.abort,'fail'):'');
  let cards=[['RPM',d.rpm],['EGT',d.egt],['dEGT',d.degt],['RPM Target',d.rtgt],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['Throttle',d.thr],['SD',d.sd]];
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
+ let cardsMan=[['RPM',d.rpm],['EGT',d.egt],['Starter',d.start],['Pump',d.pump],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2]];
+ document.getElementById('cardsMan').innerHTML=cardsMan.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
  document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
  setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('rpmtol',d.cfgRpmTol);setInp('maxegt',d.cfgMaxEgt);setInp('maxgrad',d.cfgMaxGrad);
  setInp('rpmfilter',d.cfgRpmFilter);
  setInp('purgeus',d.cfgPurgeUs);setInp('spinus',d.cfgSpinUs);setInp('assistus',d.cfgAssistUs);
  setInp('introus',d.cfgIntroUs);setInp('idleus',d.cfgIdleUs);setInp('maxus',d.cfgMaxUs);setInp('pumptestus',d.cfgPumpTestUs);
- setInp('rampfromus',d.cfgRampFromUs);setInp('ramptous',d.cfgRampToUs);setInp('rampstepms',d.cfgRampStepMs);
+ setInp('rampfromus',d.cfgRampFromUs);setInp('ramptous',d.cfgRampToUs);setInp('rampstepms',d.cfgRampStepMs);setInp('escarmholdms',d.cfgEscArmHoldMs);setInp('purgestablems',d.cfgPurgeStableMs);
  setInp('ignarmrpm',d.cfgIgnArmRpm);setInp('spinuptimeoutms',d.cfgSpinupTimeoutMs);setInp('fueldelayms',d.cfgFuelDelayMs);
  setInp('lightoffrise',d.cfgLightOffRise);setInp('lightoffconfirmms',d.cfgLightOffConfirmMs);setInp('flameprovems',d.cfgFlameProveMs);
  setInp('flameoutdropc',d.cfgFlameOutDropC);setInp('accelholdms',d.cfgAccelHoldMs);setInp('accelstepus',d.cfgAccelStepUs);setInp('purgeoutms',d.cfgPurgeOutMs);
@@ -2288,16 +2342,26 @@ void beginAutoIdle() {
   }
 }
 
-// PURGE starter PWM: ramps from startRampFromUs at +1us per startRampStepMs
-// (measured from startRampBeganMs), capped at startRampToUs.
+// PURGE starter PWM, 3 phases (see cfg.escArmHoldMs comment): ESC arm hold at
+// ESC_SAFE_US, then steady hold at startRampFromUs, then ramp +1us per
+// startRampStepMs capped at startRampToUs. Shared by the dry test and a real start.
 int starterRampUs() {
   uint32_t el = millis() - startRampBeganMs;
+  if (el <= cfg.escArmHoldMs) return ESC_SAFE_US;
+  uint32_t afterArm = el - cfg.escArmHoldMs;
+  if (afterArm <= cfg.purgeStableMs) return cfg.startRampFromUs;
+  uint32_t rampEl = afterArm - cfg.purgeStableMs;
   uint32_t step = (cfg.startRampStepMs > 0) ? cfg.startRampStepMs : 1;
-  long add = (long)(el / step);
+  long add = (long)(rampEl / step);
   long us = (long)cfg.startRampFromUs + add;
   if (us > cfg.startRampToUs) us = cfg.startRampToUs;
   return (int)us;
 }
+
+// Starter-prove-RPM check anchor: the STARTER_PROVE_TIMEOUT_MS clock should only
+// start once the ESC arm-hold phase ends (before that, the starter is deliberately
+// held at zero throttle, so RPM==0 is expected, not a starter fault).
+uint32_t starterProveDeadlineMs() { return stageEnteredMs + cfg.escArmHoldMs + STARTER_PROVE_TIMEOUT_MS; }
 
 // Starter-assist PWM tracking RPM: linear starterAssistUs (min) -> startRampToUs (max)
 // as RPM goes 0 -> starterMaxRpm. Returns ESC_SAFE_US (starter released) at/above
@@ -2324,7 +2388,7 @@ void updateDryStarting() {
   switch (startStage) {
     case ST_PURGE:
       startUs = starterRampUs();
-      if (cfg.requireRpmForStart && millis() - stageEnteredMs > STARTER_PROVE_TIMEOUT_MS &&
+      if (cfg.requireRpmForStart && millis() > starterProveDeadlineMs() &&
           (!rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS) || rpmData.rpm < cfg.starterProveMinRpm)) {
         abortAll("DRY_NO_STARTER_RPM");
         return;
@@ -2397,7 +2461,7 @@ void updateStarting() {
       // Starter ramps from 1150us (+1us/step) with no fuel/glow. Once RPM > ignArmRpm,
       // dwell purgeTimeMs to blow residual gas/fuel out, then preheat.
       startUs = starterRampUs(); pumpUs = ESC_SAFE_US; ignCmd = false; valve1Cmd = false; valve2Cmd = false;
-      if (cfg.requireRpmForStart && millis() - stageEnteredMs > STARTER_PROVE_TIMEOUT_MS && (!rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS) || rpmData.rpm < cfg.starterProveMinRpm)) { abortAll("NO_STARTER_RPM"); return; }
+      if (cfg.requireRpmForStart && millis() > starterProveDeadlineMs() && (!rpmSignalRecentWithin(RPM_SIGNAL_TIMEOUT_MS) || rpmData.rpm < cfg.starterProveMinRpm)) { abortAll("NO_STARTER_RPM"); return; }
       if (rpmMeasurementUsable() && rpmData.rpm >= (float)cfg.ignArmRpm) {
         if (starterAboveReleaseSinceMs == 0) starterAboveReleaseSinceMs = millis();      // start purge dwell
         if (millis() - starterAboveReleaseSinceMs >= cfg.purgeTimeMs) {
@@ -2666,7 +2730,7 @@ void printConfig() {
   Serial.print("accel/decel ms="); Serial.print(cfg.accelStepDelayMs); Serial.print("/"); Serial.print(cfg.decelStepDelayMs);
   Serial.print(" low="); Serial.print(cfg.lowAccelStepDelayMs); Serial.print("/"); Serial.println(cfg.lowDecelStepDelayMs);
   Serial.print("starter purge/spin/assist us="); Serial.print(cfg.starterPurgeUs); Serial.print("/"); Serial.print(cfg.starterSpinUs); Serial.print("/"); Serial.println(cfg.starterAssistUs);
-  Serial.print("purge ramp: "); Serial.print(cfg.startRampFromUs); Serial.print("->"); Serial.print(cfg.startRampToUs); Serial.print("us +1us/"); Serial.print(cfg.startRampStepMs); Serial.print("ms, arm@"); Serial.print(cfg.ignArmRpm); Serial.println("rpm");
+  Serial.print("purge ramp: arm-hold "); Serial.print(cfg.escArmHoldMs); Serial.print("ms at ESC_SAFE, then hold "); Serial.print(cfg.startRampFromUs); Serial.print("us for "); Serial.print(cfg.purgeStableMs); Serial.print("ms, then ramp ->"); Serial.print(cfg.startRampToUs); Serial.print("us +1us/"); Serial.print(cfg.startRampStepMs); Serial.print("ms, arm@"); Serial.print(cfg.ignArmRpm); Serial.println("rpm");
   Serial.print("lightoff: EGT>="); Serial.print(cfg.ignitionThresholdC); Serial.print("C & dEGT>="); Serial.print(cfg.lightOffMinRiseCps); Serial.print("C/s held "); Serial.print(cfg.lightOffConfirmMs); Serial.print("ms; flameProve="); Serial.print(cfg.flameProveMs); Serial.print("ms; flameout drop>"); Serial.print(cfg.flameOutDropC); Serial.println("C/2s");
   Serial.print("assist: "); Serial.print(cfg.starterAssistUs); Serial.print("->"); Serial.print(cfg.startRampToUs); Serial.print("us to "); Serial.print(cfg.starterMaxRpm); Serial.println("rpm then OFF");
   Serial.print("protection: starter OFF above "); Serial.print(cfg.starterMaxRpm); Serial.print(" rpm; while EGT>"); Serial.print(cfg.cooldownTargetC); Serial.print("C hold rpm>="); Serial.print(cfg.hotSpinMinRpm); Serial.print(" via starter@"); Serial.print(cfg.hotSpinUs); Serial.println("us");
@@ -2700,12 +2764,15 @@ void printHelp() {
   Serial.println("ignpulse 500..3000    -> glow ON ms then auto OFF");
   Serial.println("starttest us ms       -> starter test, e.g. starttest 1100 3000");
   Serial.println("pumptest us [ms]      -> bench pump verify only, auto-off after ms (default 1500ms, no cap)");
+  Serial.println("startmanual us | startmanual off  -> hold starter PWM (no auto-off, manual page)");
+  Serial.println("pumpmanual us | pumpmanual off    -> hold pump PWM + open valve1 (no auto-off, manual page)");
+  Serial.println("ign on | ign off                  -> hold glow (no auto-off, manual page)");
   Serial.println("valve1 on/off (Start solenoid, bench-only) | valve2 on/off (Main oil valve, bench-only)");
   Serial.println("startidle             -> guarded auto-idle start sequence");
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
   Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us> | set pumptestus <us>");
   Serial.println("set purgeus <us> | set spinus <us> | set assistus <us> -> starter crank PWM (1000..1500)");
-  Serial.println("set rampfromus/ramptous/rampstepms/ignarmrpm/spinuptimeoutms -> purge ramp");
+  Serial.println("set rampfromus/ramptous/rampstepms/escarmholdms/purgestablems/ignarmrpm/spinuptimeoutms -> purge ramp");
   Serial.println("set fueldelayms/lightoffrise/lightoffconfirmms/flameprovems/flameoutdropc/accelholdms/accelstepus/purgeoutms -> lightoff/accel");
   Serial.println("set startermaxrpm/hotspinminrpm/hotspinus -> starter protection");
   Serial.println("  (all PWM/limit tuning: intro/idleus/maxus/pumptestus/purgeus/spinus/assistus/idlerpm/maxrpm/rpmtol/maxegt/maxgrad only in WAITING/ABORTED)");
@@ -2915,6 +2982,47 @@ void handleCommand(String cmd) {
     return;
   }
 
+  // ---- Manual page: continuous holds (no duration, no auto-off) for starter/pump/glow,
+  // paralleling how valve1/valve2 on/off already work. Stop with the matching "off".
+  if (cmd.startsWith("startmanual ")) {
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: startmanual only while WAITING/ABORTED."); return; }
+    String arg = cmd.substring(String("startmanual ").length()); arg.trim();
+    if (arg == "off") { startUs = ESC_SAFE_US; manualStartOffAtMs = 0; applyOutputs(); Serial.println("STARTER MANUAL OFF."); return; }
+    int us = arg.toInt();
+    if (us < 1000 || us > 1300) { Serial.println("ERROR: startmanual us 1000..1300 (or 'startmanual off')"); return; }
+    startUs = us; manualStartOffAtMs = 0; applyOutputs();
+    Serial.print("STARTER MANUAL HOLD at "); Serial.print(us); Serial.println("us (no auto-off - 'startmanual off' to stop)");
+    return;
+  }
+
+  if (cmd.startsWith("pumpmanual ")) {
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: pumpmanual only while WAITING/ABORTED."); return; }
+    String arg = cmd.substring(String("pumpmanual ").length()); arg.trim();
+    if (arg == "off") { pumpUs = ESC_SAFE_US; fuelTargetUs = ESC_SAFE_US; fuelValvesAuto(false); manualPumpOffAtMs = 0; applyOutputs(); Serial.println("PUMP MANUAL OFF."); return; }
+    int us = arg.toInt();
+    if (us < 1000 || us > 1225) { Serial.println("ERROR: pumpmanual us 1000..1225 (or 'pumpmanual off')"); return; }
+    if (fuelCommandBlockedByHotEgt()) {
+      Serial.print("PUMPMANUAL BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
+      Serial.print("C > cooldown target "); Serial.print(cfg.cooldownTargetC); Serial.println("C).");
+      return;
+    }
+    pumpUs = us; fuelTargetUs = us; fuelValvesAuto(true); manualPumpOffAtMs = 0; applyOutputs();
+    Serial.print("PUMP MANUAL HOLD at "); Serial.print(us); Serial.print("us ~"); Serial.print(flowFromUs(us), 1);
+    Serial.println(" ml/min (no auto-off - 'pumpmanual off' to stop)");
+    return;
+  }
+
+  if (cmd == "ign on") {
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: ign only while WAITING/ABORTED."); return; }
+    if (fuelCommandBlockedByHotEgt()) {
+      Serial.print("IGN BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C).");
+      return;
+    }
+    ignCmd = true; manualIgnOffAtMs = 0; applyOutputs(); Serial.println("GLOW ON (no auto-off - 'ign off' to stop).");
+    return;
+  }
+  if (cmd == "ign off") { ignCmd = false; manualIgnOffAtMs = 0; applyOutputs(); Serial.println("GLOW OFF."); return; }
+
   if (cmd == "valve1 on") { if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE1 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve1Cmd = true; applyOutputs(); Serial.println("VALVE1 ON (no auto-off - turn off manually)"); return; }
   if (cmd == "valve1 off") { valve1Cmd = false; applyOutputs(); Serial.println("VALVE1 OFF"); return; }
   if (cmd == "valve2 on") { if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE2 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve2Cmd = true; applyOutputs(); Serial.println("VALVE2 ON (no auto-off - turn off manually)"); return; }
@@ -2954,7 +3062,7 @@ void handleCommand(String cmd) {
        cmd.startsWith("set purgeus ") || cmd.startsWith("set spinus ") || cmd.startsWith("set assistus ") ||
        cmd.startsWith("set idlerpm ") || cmd.startsWith("set maxrpm ") || cmd.startsWith("set rpmtol ") ||
        cmd.startsWith("set maxegt ") || cmd.startsWith("set maxgrad ") || cmd.startsWith("set pumptestus ") ||
-       cmd.startsWith("set rampfromus ") || cmd.startsWith("set ramptous ") || cmd.startsWith("set rampstepms ") ||
+       cmd.startsWith("set rampfromus ") || cmd.startsWith("set ramptous ") || cmd.startsWith("set rampstepms ") || cmd.startsWith("set escarmholdms ") || cmd.startsWith("set purgestablems ") ||
        cmd.startsWith("set ignarmrpm ") || cmd.startsWith("set spinuptimeoutms ") || cmd.startsWith("set fueldelayms ") ||
        cmd.startsWith("set lightoffrise ") || cmd.startsWith("set lightoffconfirmms ") || cmd.startsWith("set flameprovems ") ||
        cmd.startsWith("set flameoutdropc ") || cmd.startsWith("set accelholdms ") || cmd.startsWith("set accelstepus ") ||
@@ -2974,6 +3082,8 @@ void handleCommand(String cmd) {
   if (cmd.startsWith("set rampfromus ")) { int us = numberAfter(cmd, "set rampfromus "); if (us < 1000 || us > 1400) { Serial.println("ERROR: rampfromus 1000..1400"); return; } cfg.startRampFromUs = us; if (cfg.startRampToUs < us) cfg.startRampToUs = us; Serial.println("OK"); return; }
   if (cmd.startsWith("set ramptous ")) { int us = numberAfter(cmd, "set ramptous "); if (us < 1000 || us > 1500) { Serial.println("ERROR: ramptous 1000..1500"); return; } cfg.startRampToUs = max(us, cfg.startRampFromUs); Serial.println("OK"); return; }
   if (cmd.startsWith("set rampstepms ")) { int v = numberAfter(cmd, "set rampstepms "); if (v < 10 || v > 5000) { Serial.println("ERROR: rampstepms 10..5000"); return; } cfg.startRampStepMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set escarmholdms ")) { int v = numberAfter(cmd, "set escarmholdms "); if (v < 0 || v > 10000) { Serial.println("ERROR: escarmholdms 0..10000"); return; } cfg.escArmHoldMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set purgestablems ")) { int v = numberAfter(cmd, "set purgestablems "); if (v < 0 || v > 60000) { Serial.println("ERROR: purgestablems 0..60000"); return; } cfg.purgeStableMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set ignarmrpm ")) { int r = numberAfter(cmd, "set ignarmrpm "); if (r < 500 || r > 60000) { Serial.println("ERROR: ignarmrpm 500..60000"); return; } cfg.ignArmRpm = r; Serial.println("OK"); return; }
   if (cmd.startsWith("set spinuptimeoutms ")) { int v = numberAfter(cmd, "set spinuptimeoutms "); if (v < 5000 || v > 180000) { Serial.println("ERROR: spinuptimeoutms 5000..180000"); return; } cfg.spinupRpmTimeoutMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set fueldelayms ")) { int v = numberAfter(cmd, "set fueldelayms "); if (v < 0 || v > 20000) { Serial.println("ERROR: fueldelayms 0..20000"); return; } cfg.fuelDelayMs = (uint32_t)v; Serial.println("OK"); return; }
