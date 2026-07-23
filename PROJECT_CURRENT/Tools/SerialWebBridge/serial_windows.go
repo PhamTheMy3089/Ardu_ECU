@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"syscall"
-	"time"
 	"unsafe"
 )
 
@@ -122,42 +121,14 @@ func (p *comPort) WriteLine(s string) {
 	syscall.WriteFile(p.h, buf, &n, nil)
 }
 
-// ReadLine accumulates bytes (each ReadFile call blocks up to ~50ms per the
-// timeouts set in openComPort) until a newline is seen or timeout elapses.
-func (p *comPort) ReadLine(timeout time.Duration) (string, bool) {
-	deadline := time.Now().Add(timeout)
-	buf := make([]byte, 256)
-	var acc []byte
-	for time.Now().Before(deadline) {
-		var n uint32
-		err := syscall.ReadFile(p.h, buf, &n, nil)
-		if err == nil && n > 0 {
-			acc = append(acc, buf[:n]...)
-			if i := indexByte(acc, '\n'); i >= 0 {
-				return strings.TrimRight(string(acc[:i]), "\r"), true
-			}
-		}
+// Read fills buf with whatever bytes are available (blocking up to ~50ms per the
+// timeouts set in openComPort), returning the count. Used by the background
+// reader goroutine in main.go, which assembles bytes into lines.
+func (p *comPort) Read(buf []byte) int {
+	var n uint32
+	err := syscall.ReadFile(p.h, buf, &n, nil)
+	if err != nil {
+		return 0
 	}
-	return "", false
-}
-
-// Drain reads and discards whatever arrives for the given duration (used
-// after sending a plain command, so its human-readable reply doesn't leak
-// into the next status poll).
-func (p *comPort) Drain(d time.Duration) {
-	deadline := time.Now().Add(d)
-	buf := make([]byte, 256)
-	for time.Now().Before(deadline) {
-		var n uint32
-		syscall.ReadFile(p.h, buf, &n, nil)
-	}
-}
-
-func indexByte(b []byte, c byte) int {
-	for i, x := range b {
-		if x == c {
-			return i
-		}
-	}
-	return -1
+	return int(n)
 }

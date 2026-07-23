@@ -1,25 +1,32 @@
 // Command serial_web_bridge is a standalone (no install, no runtime deps)
-// Serial<->Web bridge for the ECU_TestV1_EGT_DRY_START_PATCH firmware.
+// bridge for the ECU_TestV1_EGT_DRY_START_PATCH firmware.
 //
-// Serves the exact same dashboard page the ECU's own WiFi web server serves
-// (embedded from page.html, extracted verbatim from htmlPage()), but talks
-// to the ECU over a Serial/USB-TTL link (GSU_DEBUG_UART1) instead of WiFi.
-// Useful as a control channel that keeps working if the ECU's WiFi/SoftAP
-// becomes unresponsive (e.g. under a brownout-adjacent voltage sag), since
-// it never depends on the ESP32's WiFi radio at all.
+// It serves the ECU control UI (page.html - the single UI; the firmware no
+// longer serves its own web page) on a local HTTP port, and talks to the ECU
+// over ONE of two connection modes:
+//
+//   wire : Serial/USB-TTL to GSU_DEBUG_UART1. The Terminal tab shows ALL raw
+//          Serial output (boot/brownout logs, command replies).
+//   wifi : the ECU's SoftAP - proxies /api and /cmd over HTTP to the ECU. The
+//          Terminal tab then only shows the ECU Event Log (WiFi doesn't survive
+//          a reset, so it can't capture reset logs).
 //
 // Build (Windows target, from any OS with Go installed):
 //   GOOS=windows GOARCH=amd64 go build -o serial_web_bridge.exe .
 //
-// Run: double-click serial_web_bridge.exe, or from a terminal:
-//   serial_web_bridge.exe [COM-port] [baud] [http-port]
-// If COM-port is omitted, it is asked for interactively.
+// Run:
+//   serial_web_bridge.exe                     (asks mode/target interactively)
+//   serial_web_bridge.exe wire COM5
+//   serial_web_bridge.exe wifi 192.168.4.1
+// optional: [baud] [http-port] as extra args, e.g. wire COM5 115200 8080
 package main
 
 import (
 	"bufio"
 	_ "embed"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,86 +40,227 @@ import (
 var pageHTML []byte
 
 const (
-	statusTimeout  = 1000 * time.Millisecond // how long to wait for the "apijson" reply line
-	drainAfterCmd  = 150 * time.Millisecond  // time to drain a command's human-readable Serial.println output
-	defaultBaud    = 115200
-	defaultHTTPPrt = 8080
+	termMax       = 2000
+	statusPollWire = 400 * time.Millisecond
+	statusPollWiFi = 500 * time.Millisecond
+	wifiTimeout    = 1500 * time.Millisecond
 )
 
 var (
-	mu             sync.Mutex
-	port           *comPort
-	lastStatusJSON = []byte(`{"error":"no response from ECU yet"}`)
+	mu         sync.Mutex
+	lastStatus = `{"error":"chua co du lieu tu ECU"}`
+	termLines  []string
+	termBase   int
+	connState  = "-"
+
+	mode     string // "wire" | "wifi"
+	port     *comPort
+	wifiBase string
 )
 
-func askLine(prompt, def string) string {
-	fmt.Print(prompt)
-	if def != "" {
-		fmt.Printf(" [%s]: ", def)
+func addTerm(line string) {
+	mu.Lock()
+	defer mu.Unlock()
+	termLines = append(termLines, line)
+	if len(termLines) > termMax {
+		drop := len(termLines) - termMax
+		termLines = termLines[drop:]
+		termBase += drop
+	}
+}
+
+func isStatusJSON(line string) bool {
+	return strings.HasPrefix(line, "{") && strings.Contains(line, `"mode"`)
+}
+
+// ---------------- wire mode ----------------
+
+func wireReader() {
+	buf := make([]byte, 512)
+	var acc []byte
+	for {
+		n := port.Read(buf)
+		if n <= 0 {
+			continue
+		}
+		acc = append(acc, buf[:n]...)
+		for {
+			i := indexByte(acc, '\n')
+			if i < 0 {
+				break
+			}
+			line := strings.TrimRight(string(acc[:i]), "\r")
+			acc = acc[i+1:]
+			if line == "" {
+				continue
+			}
+			if isStatusJSON(line) {
+				mu.Lock()
+				lastStatus = line
+				mu.Unlock()
+			} else {
+				addTerm(line)
+			}
+		}
+	}
+}
+
+func wirePoller() {
+	for {
+		port.WriteLine("apijson")
+		time.Sleep(statusPollWire)
+	}
+}
+
+// ---------------- wifi mode ----------------
+
+func wifiGet(path string) (string, error) {
+	client := http.Client{Timeout: wifiTimeout}
+	resp, err := client.Get(wifiBase + path)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return string(b), err
+}
+
+func wifiPoller() {
+	lastLogs := ""
+	for {
+		js, err := wifiGet("/api?act=1")
+		if err != nil {
+			mu.Lock()
+			connState = "MAT KET NOI"
+			mu.Unlock()
+			time.Sleep(statusPollWiFi)
+			continue
+		}
+		mu.Lock()
+		lastStatus = js
+		connState = "OK"
+		mu.Unlock()
+		var obj map[string]interface{}
+		if json.Unmarshal([]byte(js), &obj) == nil {
+			if lg, ok := obj["logs"].(string); ok && lg != "" && lg != lastLogs {
+				s := strings.ReplaceAll(lg, `\n`, " | ")
+				if len(s) > 400 {
+					s = s[len(s)-400:]
+				}
+				addTerm("[event-log] " + s)
+				lastLogs = lg
+			}
+		}
+		time.Sleep(statusPollWiFi)
+	}
+}
+
+// ---------------- shared ----------------
+
+func getStatus() string {
+	mu.Lock()
+	defer mu.Unlock()
+	return lastStatus
+}
+
+func sendCommand(cmd string) {
+	if mode == "wifi" {
+		if _, err := wifiGet("/cmd?c=" + url.QueryEscape(cmd)); err != nil {
+			addTerm("[bridge] loi gui lenh WiFi: " + err.Error())
+		}
 	} else {
-		fmt.Print(": ")
+		port.WriteLine(cmd)
 	}
-	reader := bufio.NewReader(os.Stdin)
-	line, _ := reader.ReadString('\n')
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return def
+}
+
+func termPayload(since int) string {
+	mu.Lock()
+	defer mu.Unlock()
+	total := termBase + len(termLines)
+	start := since
+	if start < termBase {
+		start = termBase
 	}
-	return line
+	idx := start - termBase
+	var lines []string
+	if idx >= 0 && idx <= len(termLines) {
+		lines = append(lines, termLines[idx:]...)
+	} else {
+		lines = append(lines, termLines...)
+	}
+	out, _ := json.Marshal(map[string]interface{}{
+		"mode": mode, "state": connState, "lines": lines, "next": total,
+	})
+	return string(out)
 }
 
 func main() {
 	args := os.Args[1:]
-	var portName string
-	baud := defaultBaud
-	httpPort := defaultHTTPPrt
+	baud := 115200
+	httpPort := 8080
+	var target string
 
 	if len(args) >= 1 {
-		portName = args[0]
+		mode = strings.ToLower(args[0])
 	}
 	if len(args) >= 2 {
-		if b, err := strconv.Atoi(args[1]); err == nil {
+		target = args[1]
+	}
+	if len(args) >= 3 {
+		if b, err := strconv.Atoi(args[2]); err == nil {
 			baud = b
 		}
 	}
-	if len(args) >= 3 {
-		if p, err := strconv.Atoi(args[2]); err == nil {
+	if len(args) >= 4 {
+		if p, err := strconv.Atoi(args[3]); err == nil {
 			httpPort = p
 		}
 	}
 
-	fmt.Println("=== ECU Serial<->Web Bridge ===")
-	if portName == "" {
-		portName = askLine("Nhap cong COM (vd: COM5)", "")
-		for portName == "" {
-			portName = askLine("Cong COM khong duoc de trong, nhap lai (vd: COM5)", "")
-		}
-	}
-	if len(args) < 2 {
-		if s := askLine("Baud rate", strconv.Itoa(baud)); s != "" {
-			if b, err := strconv.Atoi(s); err == nil {
-				baud = b
-			}
-		}
-	}
-	if len(args) < 3 {
-		if s := askLine("HTTP port (mo trinh duyet tai http://127.0.0.1:<port>/)", strconv.Itoa(httpPort)); s != "" {
-			if p, err := strconv.Atoi(s); err == nil {
-				httpPort = p
-			}
+	fmt.Println("=== ECU Bridge GSU ===")
+	rd := bufio.NewReader(os.Stdin)
+	if mode != "wire" && mode != "wifi" {
+		fmt.Print("Kieu ket noi - go 'wire' (day/Serial) hoac 'wifi' [wire]: ")
+		s, _ := rd.ReadString('\n')
+		s = strings.TrimSpace(strings.ToLower(s))
+		if s == "wifi" {
+			mode = "wifi"
+		} else {
+			mode = "wire"
 		}
 	}
 
-	var err error
-	port, err = openComPort(portName, uint32(baud))
-	if err != nil {
-		fmt.Printf("Loi mo cong %s: %v\n", portName, err)
-		fmt.Println("Nhan Enter de thoat...")
-		bufio.NewReader(os.Stdin).ReadString('\n')
-		os.Exit(1)
+	if mode == "wire" {
+		if target == "" {
+			fmt.Print("Cong COM (vd COM5): ")
+			s, _ := rd.ReadString('\n')
+			target = strings.TrimSpace(s)
+		}
+		var err error
+		port, err = openComPort(target, uint32(baud))
+		if err != nil {
+			fmt.Printf("Loi mo cong %s: %v\n", target, err)
+			fmt.Println("Nhan Enter de thoat...")
+			rd.ReadString('\n')
+			os.Exit(1)
+		}
+		defer port.Close()
+		connState = fmt.Sprintf("DAY %s @ %d", target, baud)
+		go wireReader()
+		go wirePoller()
+	} else {
+		if target == "" {
+			fmt.Print("IP cua ECU [192.168.4.1]: ")
+			s, _ := rd.ReadString('\n')
+			target = strings.TrimSpace(s)
+			if target == "" {
+				target = "192.168.4.1"
+			}
+		}
+		wifiBase = "http://" + target
+		connState = "dang ket noi..."
+		go wifiPoller()
 	}
-	defer port.Close()
-	fmt.Printf("Da mo %s @ %d baud\n", portName, baud)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -120,47 +268,37 @@ func main() {
 	})
 	http.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(pollStatus())
+		w.Write([]byte(getStatus()))
 	})
 	http.HandleFunc("/cmd", func(w http.ResponseWriter, r *http.Request) {
-		c := r.URL.Query().Get("c")
-		if c != "" {
-			c2, _ := url.QueryUnescape(c)
-			sendCommand(c2)
+		if c := r.URL.Query().Get("c"); c != "" {
+			sendCommand(c)
 		}
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write([]byte("OK"))
 	})
+	http.HandleFunc("/term", func(w http.ResponseWriter, r *http.Request) {
+		since, _ := strconv.Atoi(r.URL.Query().Get("since"))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(termPayload(since)))
+	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", httpPort)
+	fmt.Printf("Che do: %s\n", strings.ToUpper(mode))
 	fmt.Printf("Dashboard: http://%s/\n", addr)
 	fmt.Println("Dong cua so nay de dung. (Ctrl+C)")
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		fmt.Println("Loi HTTP server:", err)
 		fmt.Println("Nhan Enter de thoat...")
-		bufio.NewReader(os.Stdin).ReadString('\n')
+		rd.ReadString('\n')
 	}
 }
 
-// pollStatus sends "apijson" and returns the JSON text the firmware prints back.
-func pollStatus() []byte {
-	mu.Lock()
-	defer mu.Unlock()
-	port.Purge()
-	port.WriteLine("apijson")
-	line, ok := port.ReadLine(statusTimeout)
-	if ok && strings.HasPrefix(line, "{") {
-		lastStatusJSON = []byte(line)
+func indexByte(b []byte, c byte) int {
+	for i, x := range b {
+		if x == c {
+			return i
+		}
 	}
-	return lastStatusJSON
-}
-
-// sendCommand mirrors the web /cmd?c=... route: sends the raw command and
-// drains its human-readable Serial.println() reply so it doesn't pollute
-// the next status poll.
-func sendCommand(cmd string) {
-	mu.Lock()
-	defer mu.Unlock()
-	port.WriteLine(cmd)
-	port.Drain(drainAfterCmd)
+	return -1
 }

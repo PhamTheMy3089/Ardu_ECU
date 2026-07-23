@@ -5,7 +5,7 @@
 body{margin:0;background:#0b1020;color:#e9eefc;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1100px;margin:auto;padding:16px}
 h1{margin:8px 0 4px;font-size:24px}.sub{color:#9fb0d0;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
 .card{background:#151d33;border:1px solid #283451;border-radius:14px;padding:12px;box-shadow:0 2px 10px #0005}.label{color:#9fb0d0;font-size:12px;text-transform:uppercase}.val{font-size:22px;font-weight:700;margin-top:4px}.warn{color:#ffcc66}.bad{color:#ff7777}.ok{color:#7dffa1}
-.btns{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.btn{border:0;border-radius:10px;padding:10px 12px;background:#293855;color:#fff;font-weight:700}.danger{background:#8a2430}.go{background:#1e7042}.arm{background:#806020}.test{background:#244c80}
+.btns{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.btn{border:0;border-radius:10px;padding:10px 12px;background:#293855;color:#fff;font-weight:700;cursor:pointer;transition:transform .08s ease,filter .08s ease,box-shadow .08s ease}.btn:hover{filter:brightness(1.14)}.btn:active{transform:scale(.93);filter:brightness(.8);box-shadow:inset 0 2px 6px #0007}.danger{background:#8a2430}.go{background:#1e7042}.arm{background:#806020}.test{background:#244c80}
 table{width:100%;border-collapse:collapse;margin-top:8px}td,th{border-bottom:1px solid #283451;padding:8px;text-align:left}.small{font-size:12px;color:#9fb0d0}.log{background:#080c18;border-radius:10px;padding:10px;min-height:80px;font-family:monospace;font-size:12px;color:#c7d5ff}
 input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;padding:8px;width:90px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}.pill{display:inline-block;border-radius:999px;padding:4px 9px;background:#263752}.pass{background:#145c34}.fail{background:#6a202b}.run{background:#6b551d}
 .tabs{display:flex;gap:6px;margin:14px 0 10px}.tabb{flex:1;padding:12px 6px;border:0;background:#151d33;color:#9fb0d0;font-weight:700;font-size:15px;border-radius:12px;cursor:pointer}.tabb.on{background:#244c80;color:#fff;box-shadow:0 2px 10px #0006}
@@ -13,8 +13,9 @@ input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;p
 .gwrap{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}.gauge{background:#151d33;border:1px solid #283451;border-radius:14px;padding:8px 14px 4px;text-align:center;flex:1;min-width:150px;max-width:260px}.gt{color:#9fb0d0;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
 .chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:10px 0}.chip{border-radius:999px;padding:6px 12px;background:#263752;font-weight:700;font-size:13px}
 summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px 0 4px}
+.term{background:#05070f;border:1px solid #283451;border-radius:10px;padding:10px;height:420px;overflow-y:auto;font-family:Consolas,'Courier New',monospace;font-size:12.5px;line-height:1.45;color:#b9ffd0;white-space:pre-wrap;word-break:break-word}
 </style></head><body><div class="wrap">
-<h1>ECU Test V1</h1><div class="sub">SoftAP ECU_TestV1 / admin1234 — http://192.168.4.1 · Điều khiển &amp; test hoàn toàn qua web</div>
+<h1>ECU Test V1</h1><div class="sub">Bridge GSU — kết nối: <b id="connMode">-</b> · <span id="connState">-</span></div>
 
 <div class="gwrap">
 <div class="gauge"><div class="gt">RPM</div>
@@ -37,6 +38,7 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <button class="tabb" id="btab_test" onclick="tab('test')">🧪 Testing</button>
 <button class="tabb" id="btab_man" onclick="tab('man')">🔧 Manual</button>
 <button class="tabb" id="btab_set" onclick="tab('set')">⚙ Settings</button>
+<button class="tabb" id="btab_term" onclick="tab('term')">🖥 Terminal</button>
 </div>
 
 <div class="panel on" id="tab_run">
@@ -92,14 +94,14 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <h3>Starter — <span id="manStartSt">-</span></h3>
 <div class="row small">PWM us <input id="manSus" value="1200">
 <button class="btn go" onclick="cmd('startmanual '+v('manSus'))">Giữ chạy</button>
-<button class="btn danger" onclick="cmd('startmanual off')">Dừng</button>
+<button class="btn danger" onclick="document.getElementById('manSus').value=1000;cmd('startmanual off')">Dừng</button>
 <button class="btn" onclick="bump('manSus',-10,'startmanual')">-10</button>
 <button class="btn" onclick="bump('manSus',10,'startmanual')">+10</button></div>
 
 <h3>Pump — <span id="manPumpSt">-</span> <span class="small">(xả ra bình/ca, KHÔNG gắn engine)</span></h3>
 <div class="row small">PWM us <input id="manPus" value="1015">
 <button class="btn go" onclick="cmd('pumpmanual '+v('manPus'))">Giữ chạy</button>
-<button class="btn danger" onclick="cmd('pumpmanual off')">Dừng</button>
+<button class="btn danger" onclick="document.getElementById('manPus').value=1000;cmd('pumpmanual off')">Dừng</button>
 <button class="btn" onclick="bump('manPus',-1,'pumpmanual')">-1</button>
 <button class="btn" onclick="bump('manPus',1,'pumpmanual')">+1</button></div>
 
@@ -129,99 +131,111 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <button class="btn go" onclick="if(confirm('Lưu toàn bộ config hiện tại vào thẻ SD? Lần sau bật máy sẽ tự nạp lại.'))cmd('savecfg')">💾 Lưu config vào SD</button>
 <button class="btn" onclick="if(confirm('Nạp lại config từ SD, ghi đè giá trị đang chỉnh?'))cmd('loadcfg')">↻ Nạp lại từ SD</button>
 </div>
-<h2>Tune — RPM &amp; Safety <span class="small">(tự nạp từ config; PWM/limit chỉ chỉnh khi WAITING/ABORTED)</span></h2><div class="row small">
-Idle RPM <input id="idlerpm" value="42000"><button class="btn" onclick="cmd('set idlerpm '+v('idlerpm'))">Set</button>
-Max RPM <input id="maxrpm" value="110000"><button class="btn" onclick="cmd('set maxrpm '+v('maxrpm'))">Set</button>
-RPM tol <input id="rpmtol" value="5000"><button class="btn" onclick="cmd('set rpmtol '+v('rpmtol'))">Set</button>
-Throttle <input id="thr" value="0"><button class="btn" onclick="cmd('set throttle '+v('thr'))">Set</button>
+<h2>Tinh chỉnh — RPM &amp; An toàn <span class="small">(tự nạp từ config; PWM/giới hạn chỉ chỉnh được khi đang CHỜ/HỦY)</span></h2><div class="row small">
+<span title="Tốc độ vòng tua mục tiêu ở chế độ chạy không tải (idle). Kết thúc khởi động khi RPM đạt mức này.">RPM chạy không tải</span> <input id="idlerpm" value="42000" title="Tốc độ vòng tua mục tiêu ở chế độ chạy không tải (idle). Kết thúc khởi động khi RPM đạt mức này."><button class="btn" onclick="cmd('set idlerpm '+v('idlerpm'))">Đặt</button>
+<span title="Vòng tua tối đa cho phép. Vượt mức này sẽ abort ngay (bảo vệ quá tốc).">RPM tối đa</span> <input id="maxrpm" value="110000" title="Vòng tua tối đa cho phép. Vượt mức này sẽ abort ngay (bảo vệ quá tốc - OVERSPEED)."><button class="btn" onclick="cmd('set maxrpm '+v('maxrpm'))">Đặt</button>
+<span title="Vùng chết (deadband) quanh RPM mục tiêu - trong khoảng này không tăng/giảm nhiên liệu, tránh dao động.">Dung sai RPM</span> <input id="rpmtol" value="5000" title="Vùng chết (deadband) quanh RPM mục tiêu - trong khoảng này không tăng/giảm nhiên liệu, tránh dao động."><button class="btn" onclick="cmd('set rpmtol '+v('rpmtol'))">Đặt</button>
+<span title="Mức ga 0-100% khi đang chạy (OPERATING): 0=idle, 100=RPM tối đa.">Ga (%)</span> <input id="thr" value="0" title="Mức ga 0-100% khi đang chạy (OPERATING): 0=idle, 100=RPM tối đa."><button class="btn" onclick="cmd('set throttle '+v('thr'))">Đặt</button>
 </div><div class="row small">
-Max EGT <input id="maxegt" value="680"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
-Max grad C/s <input id="maxgrad" value="200"><button class="btn" onclick="cmd('set maxgrad '+v('maxgrad'))">Set</button>
+<span title="Nhiệt độ khí xả (EGT) tối đa. Vượt mức này (có tính trước độ trễ cảm biến) sẽ abort ngay - bảo vệ quá nhiệt.">EGT tối đa (°C)</span> <input id="maxegt" value="680" title="Nhiệt độ khí xả (EGT) tối đa. Vượt mức này (có tính trước độ trễ cảm biến) sẽ abort ngay - bảo vệ quá nhiệt."><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Đặt</button>
+<span title="Tốc độ tăng nhiệt EGT tối đa cho phép (°C/giây). Tăng nhanh hơn mức này bị coi là bất thường.">Dốc nhiệt tối đa (°C/s)</span> <input id="maxgrad" value="200" title="Tốc độ tăng nhiệt EGT tối đa cho phép (°C/giây). Tăng nhanh hơn mức này bị coi là bất thường."><button class="btn" onclick="cmd('set maxgrad '+v('maxgrad'))">Đặt</button>
 </div>
 
-<h2>Tune — RPM sensor</h2><div class="row small">
-PPR (xung/vòng): <b id="ppr">-</b>
-<button class="btn" onclick="cmd('set ppr 1')">1</button>
-<button class="btn" onclick="cmd('set ppr 2')">2</button>
-&nbsp; RPM filter us <input id="rpmfilter" value="120"><button class="btn" onclick="cmd('set rpmfilter '+v('rpmfilter'))">Set</button>
-&nbsp; Edge: <b id="rpmedge">-</b>
-<button class="btn" onclick="cmd('set rpmedge rising')">Rising</button>
-<button class="btn" onclick="cmd('set rpmedge falling')">Falling</button>
+<h2>Tinh chỉnh — Cảm biến RPM</h2><div class="row small">
+<span title="Số xung cảm biến sinh ra trên mỗi vòng quay. Chọn đúng để RPM hiển thị chính xác.">Xung/vòng (PPR):</span> <b id="ppr">-</b>
+<button class="btn" onclick="cmd('set ppr 1')" title="1 xung mỗi vòng quay">1</button>
+<button class="btn" onclick="cmd('set ppr 2')" title="2 xung mỗi vòng quay">2</button>
+&nbsp; <span title="Lọc nhiễu: bỏ qua các xung ngắn hơn giá trị này (micro giây). Tăng lên nếu glow/starter gây xung giả.">Lọc xung (µs)</span> <input id="rpmfilter" value="120" title="Lọc nhiễu: bỏ qua các xung ngắn hơn giá trị này (micro giây). Tăng lên nếu glow/starter gây xung giả."><button class="btn" onclick="cmd('set rpmfilter '+v('rpmfilter'))">Đặt</button>
+&nbsp; <span title="Đếm theo sườn tín hiệu lên (Rising) hay xuống (Falling) của cảm biến RPM.">Sườn xung:</span> <b id="rpmedge">-</b>
+<button class="btn" onclick="cmd('set rpmedge rising')" title="Đếm theo sườn lên của tín hiệu">Lên</button>
+<button class="btn" onclick="cmd('set rpmedge falling')" title="Đếm theo sườn xuống của tín hiệu">Xuống</button>
 </div>
 
-<h2>Tune — Starter &amp; Fuel PWM</h2><div class="row small">
-Purge us <input id="purgeus" value="1100"><button class="btn" onclick="cmd('set purgeus '+v('purgeus'))">Set</button>
-Spin us <input id="spinus" value="1200"><button class="btn" onclick="cmd('set spinus '+v('spinus'))">Set</button>
-Assist us <input id="assistus" value="1200"><button class="btn" onclick="cmd('set assistus '+v('assistus'))">Set</button>
+<h2>Tinh chỉnh — Xung PWM Starter &amp; Bơm</h2><div class="row small">
+<span title="Xung starter dùng cho lệnh purge cũ (thổi khí). Đơn vị micro giây, 1000=tắt.">Purge (µs)</span> <input id="purgeus" value="1100" title="Xung starter dùng cho lệnh purge cũ (thổi khí). Đơn vị micro giây, 1000=tắt."><button class="btn" onclick="cmd('set purgeus '+v('purgeus'))">Đặt</button>
+<span title="Xung starter dùng cho lệnh spin cũ (quay thử). Micro giây.">Spin (µs)</span> <input id="spinus" value="1200" title="Xung starter dùng cho lệnh spin cũ (quay thử). Micro giây."><button class="btn" onclick="cmd('set spinus '+v('spinus'))">Đặt</button>
+<span title="Xung starter tối thiểu khi trợ lực theo RPM (assistMin). Xung khi RPM còn thấp.">Trợ lực min (µs)</span> <input id="assistus" value="1200" title="Xung starter tối thiểu khi trợ lực theo RPM (assistMin). Xung khi RPM còn thấp."><button class="btn" onclick="cmd('set assistus '+v('assistus'))">Đặt</button>
 </div><div class="row small">
-Intro us <input id="introus" value="1160"><button class="btn" onclick="cmd('set intro '+v('introus'))">Set</button>
-Idle us <input id="idleus" value="1175"><button class="btn" onclick="cmd('set idleus '+v('idleus'))">Set</button>
-Max us <input id="maxus" value="1260"><button class="btn" onclick="cmd('set maxus '+v('maxus'))">Set</button>
-Pump test us <input id="pumptestus" value="1160"><button class="btn" onclick="cmd('set pumptestus '+v('pumptestus'))">Set</button>
+<span title="Xung bơm mức khởi đầu (min) khi bắt đầu mồi nhiên liệu trong INTRO_FUEL. Micro giây.">Bơm mồi min (µs)</span> <input id="introus" value="1160" title="Xung bơm mức khởi đầu (min) khi bắt đầu mồi nhiên liệu trong INTRO_FUEL. Micro giây."><button class="btn" onclick="cmd('set intro '+v('introus'))">Đặt</button>
+<span title="Xung bơm mục tiêu khi đạt chạy không tải (idle). Micro giây.">Bơm idle (µs)</span> <input id="idleus" value="1175" title="Xung bơm mục tiêu khi đạt chạy không tải (idle). Micro giây."><button class="btn" onclick="cmd('set idleus '+v('idleus'))">Đặt</button>
+<span title="Xung bơm tối đa cho phép (trần nhiên liệu). Micro giây.">Bơm max (µs)</span> <input id="maxus" value="1260" title="Xung bơm tối đa cho phép (trần nhiên liệu). Micro giây."><button class="btn" onclick="cmd('set maxus '+v('maxus'))">Đặt</button>
+<span title="Xung bơm dùng cho lệnh test bơm trên tab Testing. Micro giây.">Bơm test (µs)</span> <input id="pumptestus" value="1160" title="Xung bơm dùng cho lệnh test bơm trên tab Testing. Micro giây."><button class="btn" onclick="cmd('set pumptestus '+v('pumptestus'))">Đặt</button>
 </div>
 
-<h2>Tune — Start sequence</h2>
-<div class="small">PURGE: starter giữ ESC_SAFE ("arm hold ms") cho ESC arm xong, rồi giữ nguyên "ramp from" trong "purge stable ms" cho starter ổn định, rồi mới tăng +1µs mỗi "ramp step ms", tới khi RPM &gt; "ign arm RPM", giữ (purge dwell = Advanced). LIGHTOFF thành công khi EGT ≥ 100°C VÀ dEGT/dt ≥ "lightoff rise" giữ "lightoff confirm ms". Mất lửa: EGT tụt &gt; "flameout drop" trong 2s hoặc &lt;100°C.</div>
+<h2>Tinh chỉnh — Trình tự khởi động</h2>
+<div class="small">PURGE: starter giữ ESC_SAFE ("giữ arm ESC") cho ESC arm xong, rồi giữ nguyên "xung ramp đầu" trong "thời gian ổn định" cho starter ổn định, rồi mới tăng +1µs mỗi "bước ramp", tới khi RPM &gt; "RPM cho mồi", giữ (purge dwell = Nâng cao). LIGHTOFF thành công khi EGT ≥ 100°C VÀ dEGT/dt ≥ "dốc bắt lửa" giữ liên tục "thời gian xác nhận". Mất lửa: EGT tụt &gt; "ngưỡng tụt" trong 2s hoặc &lt;100°C.</div>
 <div class="row small">
-Ramp from us <input id="rampfromus" value="1150"><button class="btn" onclick="cmd('set rampfromus '+v('rampfromus'))">Set</button>
-Ramp to us (assist max) <input id="ramptous" value="1450"><button class="btn" onclick="cmd('set ramptous '+v('ramptous'))">Set</button>
-Ramp step ms <input id="rampstepms" value="250"><button class="btn" onclick="cmd('set rampstepms '+v('rampstepms'))">Set</button>
-ESC arm hold ms <input id="escarmholdms" value="2000"><button class="btn" onclick="cmd('set escarmholdms '+v('escarmholdms'))">Set</button>
-Purge stable ms <input id="purgestablems" value="10000"><button class="btn" onclick="cmd('set purgestablems '+v('purgestablems'))">Set</button>
+<span title="Xung starter khởi đầu của giai đoạn PURGE (assistMin/ramp from). Micro giây.">Xung ramp đầu (µs)</span> <input id="rampfromus" value="1150" title="Xung starter khởi đầu của giai đoạn PURGE (assistMin/ramp from). Micro giây."><button class="btn" onclick="cmd('set rampfromus '+v('rampfromus'))">Đặt</button>
+<span title="Xung starter tối đa của ramp PURGE, cũng là assistMax (trợ lực tối đa). Micro giây.">Xung ramp max (µs)</span> <input id="ramptous" value="1450" title="Xung starter tối đa của ramp PURGE, cũng là assistMax (trợ lực tối đa). Micro giây."><button class="btn" onclick="cmd('set ramptous '+v('ramptous'))">Đặt</button>
+<span title="Cứ mỗi khoảng thời gian này (mili giây) thì tăng xung starter +1µs trong lúc ramp PURGE.">Bước ramp (ms)</span> <input id="rampstepms" value="250" title="Cứ mỗi khoảng thời gian này (mili giây) thì tăng xung starter +1µs trong lúc ramp PURGE."><button class="btn" onclick="cmd('set rampstepms '+v('rampstepms'))">Đặt</button>
+<span title="Thời gian giữ starter ở ESC_SAFE (1000µs, thật sự tắt) cho ESC hoàn tất tự arm trước khi cấp xung - tránh 'quay vài vòng rồi khựng'.">Giữ arm ESC (ms)</span> <input id="escarmholdms" value="2000" title="Thời gian giữ starter ở ESC_SAFE (1000µs, thật sự tắt) cho ESC hoàn tất tự arm trước khi cấp xung - tránh 'quay vài vòng rồi khựng'."><button class="btn" onclick="cmd('set escarmholdms '+v('escarmholdms'))">Đặt</button>
+<span title="Sau khi arm xong, giữ nguyên xung ramp đầu trong khoảng này (ms) cho starter chạy ổn định rồi mới bắt đầu tăng xung.">Thời gian ổn định (ms)</span> <input id="purgestablems" value="10000" title="Sau khi arm xong, giữ nguyên xung ramp đầu trong khoảng này (ms) cho starter chạy ổn định rồi mới bắt đầu tăng xung."><button class="btn" onclick="cmd('set purgestablems '+v('purgestablems'))">Đặt</button>
 </div><div class="row small">
-Ign arm RPM <input id="ignarmrpm" value="3000"><button class="btn" onclick="cmd('set ignarmrpm '+v('ignarmrpm'))">Set</button>
-Spinup timeout ms <input id="spinuptimeoutms" value="45000"><button class="btn" onclick="cmd('set spinuptimeoutms '+v('spinuptimeoutms'))">Set</button>
-Fuel delay ms <input id="fueldelayms" value="1000"><button class="btn" onclick="cmd('set fueldelayms '+v('fueldelayms'))">Set</button>
+<span title="Ngưỡng RPM coi là 'đã quay đủ': đạt mức này thì PURGE xong / cho phép mồi nhiên liệu. Cũng là điều kiện tối thiểu cho AUTO START.">RPM cho mồi</span> <input id="ignarmrpm" value="3000" title="Ngưỡng RPM coi là 'đã quay đủ': đạt mức này thì PURGE xong / cho phép mồi nhiên liệu. Cũng là điều kiện tối thiểu cho AUTO START."><button class="btn" onclick="cmd('set ignarmrpm '+v('ignarmrpm'))">Đặt</button>
+<span title="Nếu quá thời gian này (ms) mà RPM chưa đạt 'RPM cho mồi' thì abort NO_RPM. Đã tính cả thời gian arm + ổn định.">Timeout quay lên (ms)</span> <input id="spinuptimeoutms" value="45000" title="Nếu quá thời gian này (ms) mà RPM chưa đạt 'RPM cho mồi' thì abort NO_RPM. Đã tính cả thời gian arm + ổn định."><button class="btn" onclick="cmd('set spinuptimeoutms '+v('spinuptimeoutms'))">Đặt</button>
+<span title="Chờ khoảng này (ms) sau khi mở van + bơm để nhiên liệu tới buồng đốt, rồi mới bắt đầu kiểm tra bắt lửa.">Trễ nhiên liệu (ms)</span> <input id="fueldelayms" value="1000" title="Chờ khoảng này (ms) sau khi mở van + bơm để nhiên liệu tới buồng đốt, rồi mới bắt đầu kiểm tra bắt lửa."><button class="btn" onclick="cmd('set fueldelayms '+v('fueldelayms'))">Đặt</button>
 </div><div class="row small">
-Lightoff rise C/s <input id="lightoffrise" value="15"><button class="btn" onclick="cmd('set lightoffrise '+v('lightoffrise'))">Set</button>
-Lightoff confirm ms <input id="lightoffconfirmms" value="700"><button class="btn" onclick="cmd('set lightoffconfirmms '+v('lightoffconfirmms'))">Set</button>
-Flame prove ms <input id="flameprovems" value="2000"><button class="btn" onclick="cmd('set flameprovems '+v('flameprovems'))">Set</button>
+<span title="Tốc độ tăng nhiệt EGT tối thiểu (°C/giây) để coi là bắt lửa THẬT - tránh nhầm do glow làm nóng cặp nhiệt mà chưa cháy.">Dốc bắt lửa (°C/s)</span> <input id="lightoffrise" value="15" title="Tốc độ tăng nhiệt EGT tối thiểu (°C/giây) để coi là bắt lửa THẬT - tránh nhầm do glow làm nóng cặp nhiệt mà chưa cháy."><button class="btn" onclick="cmd('set lightoffrise '+v('lightoffrise'))">Đặt</button>
+<span title="Điều kiện bắt lửa (EGT đủ cao VÀ đang tăng đủ nhanh) phải giữ liên tục khoảng này (ms) mới xác nhận đã bắt lửa.">Thời gian xác nhận (ms)</span> <input id="lightoffconfirmms" value="700" title="Điều kiện bắt lửa (EGT đủ cao VÀ đang tăng đủ nhanh) phải giữ liên tục khoảng này (ms) mới xác nhận đã bắt lửa."><button class="btn" onclick="cmd('set lightoffconfirmms '+v('lightoffconfirmms'))">Đặt</button>
+<span title="Sau khi đóng van khởi động, chờ khoảng này (ms) để chắc chắn lửa còn cháy (không mất lửa) rồi mới tắt glow, đánh dấu thành công.">Thời gian giữ lửa (ms)</span> <input id="flameprovems" value="2000" title="Sau khi đóng van khởi động, chờ khoảng này (ms) để chắc chắn lửa còn cháy (không mất lửa) rồi mới tắt glow, đánh dấu thành công."><button class="btn" onclick="cmd('set flameprovems '+v('flameprovems'))">Đặt</button>
 </div><div class="row small">
-Flameout drop C <input id="flameoutdropc" value="10"><button class="btn" onclick="cmd('set flameoutdropc '+v('flameoutdropc'))">Set</button>
-Accel hold ms <input id="accelholdms" value="5000"><button class="btn" onclick="cmd('set accelholdms '+v('accelholdms'))">Set</button>
-Accel step us <input id="accelstepus" value="1"><button class="btn" onclick="cmd('set accelstepus '+v('accelstepus'))">Set</button>
-Purge-out ms <input id="purgeoutms" value="5000"><button class="btn" onclick="cmd('set purgeoutms '+v('purgeoutms'))">Set</button>
+<span title="Coi là mất lửa nếu EGT tụt nhiều hơn giá trị này (°C) trong ~2 giây (hoặc EGT xuống dưới 100°C).">Ngưỡng tụt nhiệt (°C)</span> <input id="flameoutdropc" value="10" title="Coi là mất lửa nếu EGT tụt nhiều hơn giá trị này (°C) trong ~2 giây (hoặc EGT xuống dưới 100°C)."><button class="btn" onclick="cmd('set flameoutdropc '+v('flameoutdropc'))">Đặt</button>
+<span title="Giai đoạn ACCEL_TO_IDLE: nếu RPM không tăng thì chờ khoảng này (ms) rồi mới nhích xung bơm 1 lần.">Chờ tăng tốc (ms)</span> <input id="accelholdms" value="5000" title="Giai đoạn ACCEL_TO_IDLE: nếu RPM không tăng thì chờ khoảng này (ms) rồi mới nhích xung bơm 1 lần."><button class="btn" onclick="cmd('set accelholdms '+v('accelholdms'))">Đặt</button>
+<span title="Mỗi lần nhích trong ACCEL_TO_IDLE tăng xung bơm bấy nhiêu micro giây (mặc định 1µs, rất chậm để test).">Bước tăng bơm (µs)</span> <input id="accelstepus" value="1" title="Mỗi lần nhích trong ACCEL_TO_IDLE tăng xung bơm bấy nhiêu micro giây (mặc định 1µs, rất chậm để test)."><button class="btn" onclick="cmd('set accelstepus '+v('accelstepus'))">Đặt</button>
+<span title="Khi khởi động thất bại, giữ starter chạy thổi nhiên liệu chưa cháy ra ngoài trong khoảng này (ms).">Thổi xả sau lỗi (ms)</span> <input id="purgeoutms" value="5000" title="Khi khởi động thất bại, giữ starter chạy thổi nhiên liệu chưa cháy ra ngoài trong khoảng này (ms)."><button class="btn" onclick="cmd('set purgeoutms '+v('purgeoutms'))">Đặt</button>
 </div>
 
 <h2>Bảo vệ động cơ / starter</h2>
-<div class="small">EGT &gt; Cool target (90°C) mà RPM &lt; "hot spin min" thì starter tự chạy (chống khí nóng lan lên đầu máy khi động cơ nóng dừng). RPM &gt; "starter max" thì starter tắt (chống quá tải starter).</div>
+<div class="small">EGT &gt; Ngưỡng nguội (90°C) mà RPM &lt; "RPM giữ khi nóng" thì starter tự chạy (chống khí nóng lan lên đầu máy khi động cơ nóng dừng). RPM &gt; "RPM nhả starter" thì starter tắt (chống quá tải motor đề).</div>
 <div class="row small">
-Starter max RPM <input id="startermaxrpm" value="15000"><button class="btn" onclick="cmd('set startermaxrpm '+v('startermaxrpm'))">Set</button>
-Hot spin min RPM <input id="hotspinminrpm" value="3000"><button class="btn" onclick="cmd('set hotspinminrpm '+v('hotspinminrpm'))">Set</button>
-Hot spin us <input id="hotspinus" value="1200"><button class="btn" onclick="cmd('set hotspinus '+v('hotspinus'))">Set</button>
+<span title="Vượt RPM này thì starter tự tắt (nhả cánh quạt) để RPM tự tăng lên idle - chống quá tải/quá tốc motor đề.">RPM nhả starter</span> <input id="startermaxrpm" value="15000" title="Vượt RPM này thì starter tự tắt (nhả cánh quạt) để RPM tự tăng lên idle - chống quá tải/quá tốc motor đề."><button class="btn" onclick="cmd('set startermaxrpm '+v('startermaxrpm'))">Đặt</button>
+<span title="Khi động cơ còn nóng (EGT&gt;ngưỡng nguội) mà RPM tụt dưới mức này, starter tự chạy giữ RPM - chống khí nóng dội ngược lên đầu máy.">RPM giữ khi nóng</span> <input id="hotspinminrpm" value="3000" title="Khi động cơ còn nóng (EGT&gt;ngưỡng nguội) mà RPM tụt dưới mức này, starter tự chạy giữ RPM - chống khí nóng dội ngược lên đầu máy."><button class="btn" onclick="cmd('set hotspinminrpm '+v('hotspinminrpm'))">Đặt</button>
+<span title="Xung starter dùng khi bảo vệ soak-back nóng (bắt đầu 1200µs rồi ramp +1µs/0.1s). Micro giây.">Xung giữ khi nóng (µs)</span> <input id="hotspinus" value="1200" title="Xung starter dùng khi bảo vệ soak-back nóng (bắt đầu 1200µs rồi ramp +1µs/0.1s). Micro giây."><button class="btn" onclick="cmd('set hotspinus '+v('hotspinus'))">Đặt</button>
 </div>
 
-<details><summary><b>Advanced — Timing, cooldown &amp; interlocks</b></summary>
+<details><summary><b>Nâng cao — Thời gian, làm nguội &amp; khóa liên động</b></summary>
 <div class="row small">
-Accel ms <input id="accelms" value="200"><button class="btn" onclick="cmd('set accelms '+v('accelms'))">Set</button>
-Decel ms <input id="decelms" value="200"><button class="btn" onclick="cmd('set decelms '+v('decelms'))">Set</button>
-Low accel ms <input id="lowaccelms" value="400"><button class="btn" onclick="cmd('set lowaccelms '+v('lowaccelms'))">Set</button>
-Low decel ms <input id="lowdecelms" value="400"><button class="btn" onclick="cmd('set lowdecelms '+v('lowdecelms'))">Set</button>
+<span title="Độ trễ mỗi bước tăng xung bơm (ms) khi đang chạy - càng nhỏ càng tăng ga nhanh.">Bước tăng ga (ms)</span> <input id="accelms" value="200" title="Độ trễ mỗi bước tăng xung bơm (ms) khi đang chạy - càng nhỏ càng tăng ga nhanh."><button class="btn" onclick="cmd('set accelms '+v('accelms'))">Đặt</button>
+<span title="Độ trễ mỗi bước giảm xung bơm (ms) khi đang chạy - càng nhỏ càng giảm ga nhanh.">Bước giảm ga (ms)</span> <input id="decelms" value="200" title="Độ trễ mỗi bước giảm xung bơm (ms) khi đang chạy - càng nhỏ càng giảm ga nhanh."><button class="btn" onclick="cmd('set decelms '+v('decelms'))">Đặt</button>
+<span title="Độ trễ bước tăng xung bơm (ms) ở vùng RPM thấp (khởi động/idle) - chậm hơn để êm.">Bước tăng ga thấp (ms)</span> <input id="lowaccelms" value="400" title="Độ trễ bước tăng xung bơm (ms) ở vùng RPM thấp (khởi động/idle) - chậm hơn để êm."><button class="btn" onclick="cmd('set lowaccelms '+v('lowaccelms'))">Đặt</button>
+<span title="Độ trễ bước giảm xung bơm (ms) ở vùng RPM thấp.">Bước giảm ga thấp (ms)</span> <input id="lowdecelms" value="400" title="Độ trễ bước giảm xung bơm (ms) ở vùng RPM thấp."><button class="btn" onclick="cmd('set lowdecelms '+v('lowdecelms'))">Đặt</button>
 </div><div class="row small">
-Dry start ms <input id="drystartms" value="5000"><button class="btn" onclick="cmd('set drystartms '+v('drystartms'))">Set</button>
-Accel→idle ms <input id="acceltoidlems" value="20000"><button class="btn" onclick="cmd('set acceltoidlems '+v('acceltoidlems'))">Set</button>
+<span title="Thời gian chạy starter/RPM test khô (dry) khi cặp nhiệt bị lỗi - chỉ quay starter, không nhiên liệu/van/glow.">Test khô (ms)</span> <input id="drystartms" value="5000" title="Thời gian chạy starter/RPM test khô (dry) khi cặp nhiệt bị lỗi - chỉ quay starter, không nhiên liệu/van/glow."><button class="btn" onclick="cmd('set drystartms '+v('drystartms'))">Đặt</button>
+<span title="Timeout giai đoạn ACCEL_TO_IDLE (ms): quá thời gian này chưa đạt idle thì abort.">Timeout tới idle (ms)</span> <input id="acceltoidlems" value="20000" title="Timeout giai đoạn ACCEL_TO_IDLE (ms): quá thời gian này chưa đạt idle thì abort."><button class="btn" onclick="cmd('set acceltoidlems '+v('acceltoidlems'))">Đặt</button>
 </div><div class="row small">
-Cool target C <input id="cooltarget" value="120"><button class="btn" onclick="cmd('set cooltarget '+v('cooltarget'))">Set</button>
-Cool starter us <input id="coolstarter" value="1100"><button class="btn" onclick="cmd('set coolstarter '+v('coolstarter'))">Set</button>
-Cool min ms <input id="coolminms" value="5000"> timeout ms <input id="cooltimeoutms" value="45000">
-<button class="btn" onclick="cmd('set cooldownms '+v('coolminms')+' '+v('cooltimeoutms'))">Set</button>
+<span title="Ngưỡng nhiệt coi là 'đã nguội an toàn' (°C): làm nguội kết thúc khi EGT xuống dưới mức này; cũng là ngưỡng chặn bơm/glow khi còn nóng.">Ngưỡng nguội (°C)</span> <input id="cooltarget" value="120" title="Ngưỡng nhiệt coi là 'đã nguội an toàn' (°C): làm nguội kết thúc khi EGT xuống dưới mức này; cũng là ngưỡng chặn bơm/glow khi còn nóng."><button class="btn" onclick="cmd('set cooltarget '+v('cooltarget'))">Đặt</button>
+<span title="Xung starter dùng để thổi gió làm nguội sau khi tắt máy/abort. Micro giây.">Xung làm nguội (µs)</span> <input id="coolstarter" value="1100" title="Xung starter dùng để thổi gió làm nguội sau khi tắt máy/abort. Micro giây."><button class="btn" onclick="cmd('set coolstarter '+v('coolstarter'))">Đặt</button>
+<span title="Thời gian làm nguội tối thiểu (ms) - phải chạy ít nhất bấy nhiêu dù đã nguội.">Nguội tối thiểu (ms)</span> <input id="coolminms" value="5000" title="Thời gian làm nguội tối thiểu (ms) - phải chạy ít nhất bấy nhiêu dù đã nguội."> <span title="Thời gian làm nguội tối đa (ms) - hết thời gian này thì kết thúc dù EGT chưa xuống ngưỡng.">timeout (ms)</span> <input id="cooltimeoutms" value="45000" title="Thời gian làm nguội tối đa (ms) - hết thời gian này thì kết thúc dù EGT chưa xuống ngưỡng.">
+<button class="btn" onclick="cmd('set cooldownms '+v('coolminms')+' '+v('cooltimeoutms'))">Đặt</button>
 </div><div class="row small">
-Comm timeout ms <input id="commtimeout" value="8000"><button class="btn" onclick="cmd('set commtimeout '+v('commtimeout'))">Set</button>
+<span title="Khi đang chạy có tải, nếu quá thời gian này (ms) không có lệnh/poll từ operator thì tự abort (chống mất kết nối bỏ mặc máy chạy).">Timeout kết nối (ms)</span> <input id="commtimeout" value="8000" title="Khi đang chạy có tải, nếu quá thời gian này (ms) không có lệnh/poll từ operator thì tự abort (chống mất kết nối bỏ mặc máy chạy)."><button class="btn" onclick="cmd('set commtimeout '+v('commtimeout'))">Đặt</button>
 </div><div class="row small">
-Checklist interlock: <b id="swChecklist">-</b>
-<button class="btn" onclick="cmd('set checklist on')">ON</button>
-<button class="btn danger" onclick="cmd('set checklist off')">OFF</button>
-&nbsp; Comm watchdog: <b id="swCommWd">-</b>
-<button class="btn" onclick="cmd('set commwatchdog on')">ON</button>
-<button class="btn danger" onclick="cmd('set commwatchdog off')">OFF</button>
+<span title="Bắt buộc hoàn tất checklist (Test Wizard) trước khi cho phép khởi động tự động.">Khóa checklist:</span> <b id="swChecklist">-</b>
+<button class="btn" onclick="cmd('set checklist on')" title="Bật: bắt buộc checklist trước khi start">BẬT</button>
+<button class="btn danger" onclick="cmd('set checklist off')" title="Tắt khóa checklist (chỉ dùng khi debug)">TẮT</button>
+&nbsp; <span title="Giám sát kết nối: tự abort nếu mất liên lạc operator quá 'Timeout kết nối' lúc đang chạy.">Giám sát kết nối:</span> <b id="swCommWd">-</b>
+<button class="btn" onclick="cmd('set commwatchdog on')" title="Bật giám sát mất kết nối">BẬT</button>
+<button class="btn danger" onclick="cmd('set commwatchdog off')" title="Tắt giám sát mất kết nối">TẮT</button>
 </div><div class="row small">
-SD logging: <b id="swSdlog">-</b>
-<button class="btn" onclick="cmd('set sdlog on')">ON</button>
-<button class="btn" onclick="cmd('set sdlog off')">OFF</button>
-<button class="btn" onclick="cmd('sdtest')">SD test write</button>
+<span title="Ghi log telemetry ra thẻ SD (file CSV) trong lúc chạy.">Ghi log SD:</span> <b id="swSdlog">-</b>
+<button class="btn" onclick="cmd('set sdlog on')" title="Bật ghi log ra thẻ SD">BẬT</button>
+<button class="btn" onclick="cmd('set sdlog off')" title="Tắt ghi log ra thẻ SD">TẮT</button>
+<button class="btn" onclick="cmd('sdtest')" title="Ghi thử 1 dòng ra thẻ SD để kiểm tra thẻ hoạt động">Ghi thử SD</button>
 </div>
 </details>
 </div><!-- /settings -->
+
+<div class="panel" id="tab_term">
+<h2>Terminal — dữ liệu thô từ ECU</h2>
+<div class="small">Hiển thị trực tiếp dòng dữ liệu ECU gửi ra. Chế độ <b>Dây (Serial)</b>: thấy TẤT CẢ dòng Serial (kể cả log khởi động/brownout, phản hồi lệnh). Chế độ <b>WiFi</b>: chỉ thấy Event Log của ECU (không thấy được log reset vì WiFi không sống sót qua lúc đó).</div>
+<div class="row small">
+<input id="termcmd" placeholder="Gõ lệnh gửi ECU (vd: help, status, printconfig)" style="width:60%" onkeydown="if(event.key=='Enter')termSend()">
+<button class="btn go" onclick="termSend()" title="Gửi lệnh này tới ECU qua kết nối hiện tại">Gửi</button>
+<button class="btn" onclick="document.getElementById('termbox').textContent='';termSince=0" title="Xoá nội dung terminal đang hiển thị">Xoá màn hình</button>
+<button class="btn" onclick="termAuto=!termAuto;txt('termAutoLbl',termAuto?'BẬT':'TẮT')" title="Tự cuộn xuống dòng mới nhất">Tự cuộn: <b id="termAutoLbl">BẬT</b></button>
+</div>
+<div class="term" id="termbox"></div>
+</div><!-- /term -->
 
 <h2>Event Log</h2><div class="log" id="logs"></div>
 </div><script>
@@ -231,9 +245,18 @@ function bump(id,delta,prefix){var e=document.getElementById(id);var val=(parseI
 function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
 function setInp(id,val){var e=document.getElementById(id);if(e&&val!==undefined&&document.activeElement!==e)e.value=val;}
 function txt(id,val){var e=document.getElementById(id);if(e&&val!==undefined)e.textContent=val;}
-function tab(n){['run','test','man','set'].forEach(function(t){
+function tab(n){['run','test','man','set','term'].forEach(function(t){
  document.getElementById('tab_'+t).classList.toggle('on',t==n);
  document.getElementById('btab_'+t).classList.toggle('on',t==n);});}
+var termSince=0, termAuto=true;
+function termSend(){var e=document.getElementById('termcmd');var c=e.value.trim();if(!c)return;cmd(c);e.value='';}
+function termPoll(){fetch('/term?since='+termSince).then(function(r){return r.json()}).then(function(d){
+ if(d.mode!==undefined){txt('connMode',d.mode);txt('connState',d.state||'');}
+ if(d.lines&&d.lines.length){var box=document.getElementById('termbox');
+  box.textContent+=d.lines.join('\n')+'\n';termSince=d.next;
+  if(termAuto)box.scrollTop=box.scrollHeight;}
+}).catch(function(){});}
+setInterval(termPoll,500);termPoll();
 function gauge(arc,tid,val,max,warnFrac){
  var f=max>0?Math.max(0,Math.min(1,val/max)):0;var L=157;
  var a=document.getElementById(arc);a.style.strokeDashoffset=(L*(1-f)).toFixed(1);
