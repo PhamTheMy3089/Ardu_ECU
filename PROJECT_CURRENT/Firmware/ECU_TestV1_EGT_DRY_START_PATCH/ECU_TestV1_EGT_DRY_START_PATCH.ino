@@ -186,6 +186,10 @@ struct Config {
   // PUMP, VALVES and IGN are forced OFF in dry mode. Real fuel start still requires EGT OK.
   bool allowDryStartWhenEgtFault = true;
   uint32_t dryStartRunMs = 5000;
+  // Manual page safety: if glow is held ON manually (bench test) and EGT stays
+  // >= ignitionThresholdC for this long, force glow OFF (no point heating an
+  // already-hot chamber, and avoids leaving the glow plug on unattended).
+  uint32_t manualGlowOffHoldMs = 5000;
   bool requireRpmForStart = true;
   bool abortOnEgtFault = true;
   bool abortOnRpmFault = true;
@@ -342,6 +346,7 @@ bool stage2Armed = false;
 bool abortAcknowledged = false;  // must be set via clearabort before re-arm from ABORTED
 bool runStartedByButton = false; // true if the current run was started by the physical button (comm watchdog does not apply)
 uint32_t stage2ArmUntilMs = 0, manualIgnOffAtMs = 0, manualStartOffAtMs = 0;
+uint32_t manualGlowHotSinceMs = 0; // manual-page safety: EGT>=ignitionThresholdC continuously since this time while glow held on
 uint32_t lastOperatorLinkMs = 0;  // last Serial/Web command or Web UI /api poll; feeds the comm watchdog
 String lastAbortReason = "NONE";
 String serialCmdBuf = "";  // non-blocking serial command accumulator
@@ -631,15 +636,17 @@ void applyOutputs() {
 }
 
 void fuelValvesAuto(bool on) {
+  // VALVE1 (Start solenoid valve): only fed by this function during the
+  // ignition/accel-to-idle sequence, force-closed the instant normal running
+  // (IDLING/OPERATING) is reached so the main circuit alone carries fuel from
+  // then on. In WAITING/ABORTED (bench/manual tests) it is left untouched
+  // here - it may already be open via a separate manual "valve1 on" command.
+  if (ecuMode == MODE_STARTING) valve1Cmd = on;
+  else if (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) valve1Cmd = false;
   // VALVE2 (Main oil valve): open whenever fuel is commanded, matching the
-  // EnJet manual's "Oil Pump Test" behavior (linked to the main oil circuit
-  // regardless of engine mode).
-  valve2Cmd = on;
-  // VALVE1 (Start solenoid valve): only feeds the start oil circuit during
-  // the ignition/accel-to-idle sequence. Closes automatically the instant
-  // ecuMode leaves MODE_STARTING (e.g. the moment IDLING is entered), so the
-  // main circuit alone carries fuel for the rest of IDLING/OPERATING.
-  valve1Cmd = on && (ecuMode == MODE_STARTING);
+  // EnJet manual's "Oil Pump Test" behavior - but only if valve1 isn't
+  // already providing a fuel path (one open valve is enough; don't open both).
+  valve2Cmd = on && !valve1Cmd;
 }
 void forceSafeOutputs() { fuelTargetRpm = 0; fuelTargetUs = ESC_SAFE_US; pumpUs = ESC_SAFE_US; startUs = ESC_SAFE_US; ignCmd = valve1Cmd = valve2Cmd = false; applyOutputs(); }
 void enterMode(EcuMode m) {
@@ -1403,6 +1410,7 @@ bool saveConfigToSd() {
   f.print("lowaccelms=");   f.println(cfg.lowAccelStepDelayMs);
   f.print("lowdecelms=");   f.println(cfg.lowDecelStepDelayMs);
   f.print("drystartms=");   f.println(cfg.dryStartRunMs);
+  f.print("manglowoffms="); f.println(cfg.manualGlowOffHoldMs);
   f.print("acceltoidlems=");f.println(cfg.accelToIdleTimeoutMs);
   f.print("cooltarget=");   f.println(cfg.cooldownTargetC);
   f.print("coolstarter=");  f.println(cfg.cooldownStarterUs);
@@ -1460,6 +1468,7 @@ void applyConfigKV(const String& key, const String& val) {
   else if (key == "lowaccelms")   cfg.lowAccelStepDelayMs = clampCfgInt(n, 100, 3000);
   else if (key == "lowdecelms")   cfg.lowDecelStepDelayMs = clampCfgInt(n, 100, 3000);
   else if (key == "drystartms")   cfg.dryStartRunMs = (uint32_t)clampCfgInt(n, 1000, 15000);
+  else if (key == "manglowoffms") cfg.manualGlowOffHoldMs = (uint32_t)clampCfgInt(n, 0, 60000);
   else if (key == "acceltoidlems")cfg.accelToIdleTimeoutMs = (uint32_t)clampCfgInt(n, 5000, 60000);
   else if (key == "cooltarget")   cfg.cooldownTargetC = clampCfgInt(n, 50, 250);
   else if (key == "coolstarter")  cfg.cooldownStarterUs = clampCfgInt(n, 1000, 1200);
@@ -1944,6 +1953,7 @@ String webStatusJson() {
   s += "\"cfgRpmEdge\":\"" + String(rpmEdgeName()) + "\",";
   s += "\"cfgMaxGrad\":\"" + String(cfg.maxTempGradientCps) + "\",";
   s += "\"cfgDryStartMs\":\"" + String(cfg.dryStartRunMs) + "\",";
+  s += "\"cfgManGlowOffMs\":\"" + String(cfg.manualGlowOffHoldMs) + "\",";
   s += "\"cfgAccelMs\":\"" + String(cfg.accelStepDelayMs) + "\",";
   s += "\"cfgDecelMs\":\"" + String(cfg.decelStepDelayMs) + "\",";
   s += "\"cfgLowAccelMs\":\"" + String(cfg.lowAccelStepDelayMs) + "\",";
@@ -2069,7 +2079,9 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <h3>Glow plug — <span id="manIgnSt">-</span></h3>
 <div class="row small">
 <button class="btn go" onclick="cmd('ign on')">ON</button>
-<button class="btn danger" onclick="cmd('ign off')">OFF</button></div>
+<button class="btn danger" onclick="cmd('ign off')">OFF</button>
+<span class="small">Tự tắt nếu EGT&gt;=ignitionThresholdC (Settings) liên tục</span>
+Auto-off hold ms <input id="manglowoffms" value="5000"><button class="btn" onclick="cmd('set manglowoffms '+v('manglowoffms'))">Set</button></div>
 
 <h3>Valve 1 (Start solenoid) — <span id="manV1St">-</span></h3>
 <div class="row small">
@@ -2229,7 +2241,7 @@ function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).t
  setInp('flameoutdropc',d.cfgFlameOutDropC);setInp('accelholdms',d.cfgAccelHoldMs);setInp('accelstepus',d.cfgAccelStepUs);setInp('purgeoutms',d.cfgPurgeOutMs);
  setInp('startermaxrpm',d.cfgStarterMaxRpm);setInp('hotspinminrpm',d.cfgHotSpinMinRpm);setInp('hotspinus',d.cfgHotSpinUs);
  setInp('accelms',d.cfgAccelMs);setInp('decelms',d.cfgDecelMs);setInp('lowaccelms',d.cfgLowAccelMs);setInp('lowdecelms',d.cfgLowDecelMs);
- setInp('drystartms',d.cfgDryStartMs);setInp('acceltoidlems',d.cfgAccelToIdleMs);
+ setInp('drystartms',d.cfgDryStartMs);setInp('acceltoidlems',d.cfgAccelToIdleMs);setInp('manglowoffms',d.cfgManGlowOffMs);
  setInp('cooltarget',d.cfgCoolTarget);setInp('coolstarter',d.cfgCoolStarter);setInp('coolminms',d.cfgCoolMinMs);setInp('cooltimeoutms',d.cfgCoolTimeoutMs);
  setInp('commtimeout',d.cfgCommTimeout);
  txt('ppr',d.cfgPpr);txt('rpmedge',d.cfgRpmEdge);txt('swEgtDry',d.swEgtDry);
@@ -2747,6 +2759,7 @@ void printConfig() {
   Serial.print("requireChecklistForStart="); Serial.println(cfg.requireChecklistForStart ? "ON" : "OFF");
   Serial.print("allowDryStartWhenEgtFault="); Serial.println(cfg.allowDryStartWhenEgtFault ? "ON" : "OFF");
   Serial.print("dryStartRunMs="); Serial.println(cfg.dryStartRunMs);
+  Serial.print("manualGlowOffHoldMs="); Serial.print(cfg.manualGlowOffHoldMs); Serial.print("ms (auto-off if EGT>="); Serial.print(cfg.ignitionThresholdC); Serial.println("C this long while glow held manually)");
   Serial.print("webEnabled="); Serial.println(cfg.webEnabled ? "ON" : "OFF");
   Serial.print("statusLedGPIO="); Serial.print(PIN_STATUS_LED); Serial.println(STATUS_LED_ACTIVE_LOW ? " active LOW" : " active HIGH");
   Serial.print("sdLoggingEnabled="); Serial.println(cfg.sdLoggingEnabled ? "ON" : "OFF");
@@ -2776,6 +2789,7 @@ void printHelp() {
   Serial.println("valve1 on/off (Start solenoid, bench-only) | valve2 on/off (Main oil valve, bench-only)");
   Serial.println("startidle             -> guarded auto-idle start sequence");
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
+  Serial.println("set manglowoffms <ms> -> manual page: auto-off glow if EGT>=ignitionThresholdC this long");
   Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us> | set pumptestus <us>");
   Serial.println("set purgeus <us> | set spinus <us> | set assistus <us> -> starter crank PWM (1000..1500)");
   Serial.println("set rampfromus/ramptous/rampstepms/escarmholdms/purgestablems/ignarmrpm/spinuptimeoutms -> purge ramp");
@@ -3060,6 +3074,7 @@ void handleCommand(String cmd) {
   if (cmd == "set egtstart dry") { cfg.allowDryStartWhenEgtFault = true; Serial.println("EGT start mode = DRY: EGT fault converts startidle to dry starter/RPM test, no fuel/valves/ign."); addLog("EGT START MODE DRY"); return; }
   if (cmd == "set egtstart strict") { cfg.allowDryStartWhenEgtFault = false; Serial.println("EGT start mode = STRICT: EGT fault blocks startidle."); addLog("EGT START MODE STRICT"); return; }
   if (cmd.startsWith("set drystartms ")) { int v = numberAfter(cmd, "set drystartms "); if (v < 1000 || v > 15000) { Serial.println("ERROR: drystartms 1000..15000"); return; } cfg.dryStartRunMs = (uint32_t)v; Serial.println("OK"); return; }
+  if (cmd.startsWith("set manglowoffms ")) { int v = numberAfter(cmd, "set manglowoffms "); if (v < 0 || v > 60000) { Serial.println("ERROR: manglowoffms 0..60000"); return; } cfg.manualGlowOffHoldMs = (uint32_t)v; Serial.println("OK"); return; }
   if (cmd.startsWith("set ppr ")) { if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: set ppr only in WAITING/ABORTED (rescales live RPM)."); return; } int p = numberAfter(cmd, "set ppr "); if (p != 1 && p != 2) { Serial.println("ERROR: ppr 1 or 2"); return; } cfg.pulsesPerRev = p; resetRpmStats(); Serial.println("OK"); return; }
   // Bench-only tuning guard: block PWM / RPM / EGT-limit setters while the engine
   // is running, so a stray Serial/Web command cannot move a live setpoint or the
@@ -3186,6 +3201,22 @@ void loop() {
   updateActiveTest();
   isStage2Armed();
   updateRpm(); updateEgt();
+  // Manual page safety: glow held ON by hand (bench test) with EGT staying at/above
+  // ignitionThresholdC for manualGlowOffHoldMs -> force it off (no reason to keep
+  // heating an already-hot chamber, and guards against it being left on unattended).
+  if (ignCmd && (ecuMode == MODE_WAITING || ecuMode == MODE_ABORTED)) {
+    if (egt.ok && egt.c >= (float)cfg.ignitionThresholdC) {
+      if (manualGlowHotSinceMs == 0) manualGlowHotSinceMs = millis();
+      else if (millis() - manualGlowHotSinceMs >= cfg.manualGlowOffHoldMs) {
+        ignCmd = false; manualIgnOffAtMs = 0; manualGlowHotSinceMs = 0; applyOutputs();
+        Serial.print("GLOW AUTO OFF: EGT>="); Serial.print(cfg.ignitionThresholdC); Serial.println("C for manualGlowOffHoldMs.");
+      }
+    } else {
+      manualGlowHotSinceMs = 0;
+    }
+  } else {
+    manualGlowHotSinceMs = 0;
+  }
   switch (ecuMode) {
     case MODE_WAITING: break;
     case MODE_STARTING: updateStarting(); break;
