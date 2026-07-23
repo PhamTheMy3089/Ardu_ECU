@@ -54,9 +54,24 @@ var (
 	connState  = "-"
 
 	mode     string // "wire" | "wifi"
-	port     *comPort
 	wifiBase string
+
+	portMu sync.Mutex // guards port across the reader/poller goroutines and Reconnect
+	port   *comPort
+
+	lastRxMs   int64  // unix ms of last successfully parsed serial line, 0 = none yet (wire mode)
+	wireInfo   string // e.g. "COM5 @ 115200", for display in connState
+	wireTarget string // saved COM port name, for Reconnect
+	wireBaud   int    // saved baud, for Reconnect
 )
+
+func curPort() *comPort {
+	portMu.Lock()
+	defer portMu.Unlock()
+	return port
+}
+
+const wireStaleAfter = 2 * time.Second // no serial line for this long -> report as disconnected
 
 func addTerm(line string) {
 	mu.Lock()
@@ -79,7 +94,13 @@ func wireReader() {
 	buf := make([]byte, 512)
 	var acc []byte
 	for {
-		n := port.Read(buf)
+		p := curPort()
+		if p == nil {
+			acc = acc[:0]
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		n := p.Read(buf)
 		if n <= 0 {
 			continue
 		}
@@ -94,6 +115,9 @@ func wireReader() {
 			if line == "" {
 				continue
 			}
+			mu.Lock()
+			lastRxMs = time.Now().UnixMilli()
+			mu.Unlock()
 			if isStatusJSON(line) {
 				mu.Lock()
 				lastStatus = line
@@ -107,8 +131,63 @@ func wireReader() {
 
 func wirePoller() {
 	for {
-		port.WriteLine("apijson")
+		if p := curPort(); p != nil {
+			p.WriteLine("apijson")
+		}
 		time.Sleep(statusPollWire)
+	}
+}
+
+// reconnectWire closes and re-opens the saved COM port. Used by the /reconnect
+// endpoint so the user can recover after unplug/replug or an ECU brownout
+// without restarting the whole bridge.
+func reconnectWire() {
+	portMu.Lock()
+	if port != nil {
+		port.Close()
+		port = nil
+	}
+	np, err := openComPort(wireTarget, uint32(wireBaud))
+	if err == nil {
+		port = np
+	}
+	portMu.Unlock()
+	mu.Lock()
+	lastRxMs = 0
+	if err != nil {
+		connState = "LOI MO LAI CONG: " + err.Error() + " (" + wireInfo + ")"
+	}
+	mu.Unlock()
+	if err != nil {
+		addTerm("[bridge] ket noi lai that bai: " + err.Error())
+	} else {
+		addTerm("[bridge] da mo lai cong " + wireInfo)
+	}
+}
+
+// wireWatchdog turns "the COM port opened OK at startup" into a live
+// connected/disconnected indicator: connState previously stayed frozen at the
+// startup message forever, even if the ECU stopped responding entirely
+// (unplugged, crashed, brownout) - this derives real liveness from whether
+// any serial line has actually been received recently.
+func wireWatchdog() {
+	for {
+		mu.Lock()
+		rx := lastRxMs
+		mu.Unlock()
+		var s string
+		switch {
+		case rx == 0:
+			s = "Dang cho phan hoi... (" + wireInfo + ")"
+		case time.Now().UnixMilli()-rx < wireStaleAfter.Milliseconds():
+			s = "OK (" + wireInfo + ")"
+		default:
+			s = fmt.Sprintf("MAT KET NOI - khong phan hoi %ds (%s)", (time.Now().UnixMilli()-rx)/1000, wireInfo)
+		}
+		mu.Lock()
+		connState = s
+		mu.Unlock()
+		time.Sleep(300 * time.Millisecond)
 	}
 }
 
@@ -168,8 +247,25 @@ func sendCommand(cmd string) {
 		if _, err := wifiGet("/cmd?c=" + url.QueryEscape(cmd)); err != nil {
 			addTerm("[bridge] loi gui lenh WiFi: " + err.Error())
 		}
+	} else if p := curPort(); p != nil {
+		p.WriteLine(cmd)
 	} else {
-		port.WriteLine(cmd)
+		addTerm("[bridge] chua co ket noi - bam 'Ket noi lai'")
+	}
+}
+
+// reconnect re-establishes the link for either mode: wire re-opens the COM
+// port; wifi just clears the state so the poller re-probes immediately (it
+// already retries continuously, but this gives the user an explicit action
+// and instant feedback).
+func reconnect() {
+	if mode == "wire" {
+		reconnectWire()
+	} else {
+		mu.Lock()
+		connState = "dang ket noi lai..."
+		mu.Unlock()
+		addTerm("[bridge] thu ket noi lai WiFi " + wifiBase)
 	}
 }
 
@@ -245,9 +341,13 @@ func main() {
 			os.Exit(1)
 		}
 		defer port.Close()
-		connState = fmt.Sprintf("DAY %s @ %d", target, baud)
+		wireTarget = target
+		wireBaud = baud
+		wireInfo = fmt.Sprintf("%s @ %d", target, baud)
+		connState = "Dang cho phan hoi... (" + wireInfo + ")"
 		go wireReader()
 		go wirePoller()
+		go wireWatchdog()
 	} else {
 		if target == "" {
 			fmt.Print("IP cua ECU [192.168.4.1]: ")
@@ -281,6 +381,11 @@ func main() {
 		since, _ := strconv.Atoi(r.URL.Query().Get("since"))
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(termPayload(since)))
+	})
+	http.HandleFunc("/reconnect", func(w http.ResponseWriter, r *http.Request) {
+		reconnect()
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("OK"))
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", httpPort)

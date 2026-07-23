@@ -14,8 +14,13 @@ input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;p
 .chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:10px 0}.chip{border-radius:999px;padding:6px 12px;background:#263752;font-weight:700;font-size:13px}
 summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px 0 4px}
 .term{background:#05070f;border:1px solid #283451;border-radius:10px;padding:10px;height:420px;overflow-y:auto;font-family:Consolas,'Courier New',monospace;font-size:12.5px;line-height:1.45;color:#b9ffd0;white-space:pre-wrap;word-break:break-word}
+#connDot{font-size:14px;vertical-align:middle}.cdot-ok{color:#7dffa1}.cdot-bad{color:#ff7777}.cdot-wait{color:#ffcc66}
+.dcbanner{background:#8a2430;color:#fff;font-weight:700;text-align:center;padding:10px;border-radius:10px;margin:8px 0;animation:dcblink 1s steps(1) infinite}@keyframes dcblink{50%{background:#5a1620}}
 </style></head><body><div class="wrap">
-<h1>ECU Test V1</h1><div class="sub">Bridge GSU — kết nối: <b id="connMode">-</b> · <span id="connState">-</span></div>
+<h1>ECU Test V1</h1><div class="sub">Bridge GSU — kết nối: <b id="connMode">-</b> ·
+<span id="connDot" title="Trạng thái kết nối tới ECU">●</span> <span id="connState">-</span>
+<button class="btn" id="btnReconnect" onclick="reconnect()" title="Đóng và mở lại kết nối tới ECU (mở lại cổng COM ở chế độ dây, hoặc dò lại WiFi)">Kết nối lại</button></div>
+<div id="dcBanner" class="dcbanner" style="display:none">⚠ MẤT KẾT NỐI TỚI ECU — không điều khiển được. Kiểm tra dây/nguồn rồi bấm "Kết nối lại".</div>
 
 <div class="gwrap">
 <div class="gauge"><div class="gt">RPM</div>
@@ -94,14 +99,14 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <h3>Starter — <span id="manStartSt">-</span></h3>
 <div class="row small">PWM us <input id="manSus" value="1200">
 <button class="btn go" onclick="cmd('startmanual '+v('manSus'))">Giữ chạy</button>
-<button class="btn danger" onclick="document.getElementById('manSus').value=1000;cmd('startmanual off')">Dừng</button>
+<button class="btn danger" onclick="document.getElementById('manSus').value=1200;cmd('startmanual off')">Dừng</button>
 <button class="btn" onclick="bump('manSus',-10,'startmanual')">-10</button>
 <button class="btn" onclick="bump('manSus',10,'startmanual')">+10</button></div>
 
 <h3>Pump — <span id="manPumpSt">-</span> <span class="small">(xả ra bình/ca, KHÔNG gắn engine)</span></h3>
 <div class="row small">PWM us <input id="manPus" value="1015">
 <button class="btn go" onclick="cmd('pumpmanual '+v('manPus'))">Giữ chạy</button>
-<button class="btn danger" onclick="document.getElementById('manPus').value=1000;cmd('pumpmanual off')">Dừng</button>
+<button class="btn danger" onclick="document.getElementById('manPus').value=1015;cmd('pumpmanual off')">Dừng</button>
 <button class="btn" onclick="bump('manPus',-1,'pumpmanual')">-1</button>
 <button class="btn" onclick="bump('manPus',1,'pumpmanual')">+1</button></div>
 
@@ -250,8 +255,19 @@ function tab(n){['run','test','man','set','term'].forEach(function(t){
  document.getElementById('btab_'+t).classList.toggle('on',t==n);});}
 var termSince=0, termAuto=true;
 function termSend(){var e=document.getElementById('termcmd');var c=e.value.trim();if(!c)return;cmd(c);e.value='';}
+function setConn(mode,state){
+ txt('connMode',mode||'-');txt('connState',state||'');
+ var st=(state||'').toUpperCase();
+ var bad=st.indexOf('MAT KET NOI')>=0||st.indexOf('LOI')>=0;
+ var wait=st.indexOf('DANG')>=0||st.indexOf('CHO')>=0||state==''||state=='-';
+ var dot=document.getElementById('connDot');
+ dot.className=bad?'cdot-bad':(wait?'cdot-wait':'cdot-ok');
+ document.getElementById('dcBanner').style.display=bad?'block':'none';}
+function reconnect(){var b=document.getElementById('btnReconnect');b.textContent='Đang kết nối...';
+ fetch('/reconnect').then(function(){setTimeout(function(){b.textContent='Kết nối lại';},800);})
+ .catch(function(){b.textContent='Kết nối lại';});}
 function termPoll(){fetch('/term?since='+termSince).then(function(r){return r.json()}).then(function(d){
- if(d.mode!==undefined){txt('connMode',d.mode);txt('connState',d.state||'');}
+ if(d.mode!==undefined){setConn(d.mode,d.state);}
  if(d.lines&&d.lines.length){var box=document.getElementById('termbox');
   box.textContent+=d.lines.join('\n')+'\n';termSince=d.next;
   if(termAuto)box.scrollTop=box.scrollHeight;}
