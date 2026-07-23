@@ -2052,14 +2052,14 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <h2>Điều khiển tay (Manual) <span class="small">— giữ nguyên tới khi bạn tắt, không tự động</span></h2>
 <div class="btns"><button class="btn danger" onclick="cmd('off')">🛑 SAFE OFF — TẮT HẾT NGAY</button></div>
 
-<h3>Starter</h3>
+<h3>Starter — <span id="manStartSt">-</span></h3>
 <div class="row small">PWM us <input id="manSus" value="1200">
 <button class="btn go" onclick="cmd('startmanual '+v('manSus'))">Giữ chạy</button>
 <button class="btn danger" onclick="cmd('startmanual off')">Dừng</button>
 <button class="btn" onclick="bump('manSus',-10,'startmanual')">-10</button>
 <button class="btn" onclick="bump('manSus',10,'startmanual')">+10</button></div>
 
-<h3>Pump <span class="small">(xả ra bình/ca, KHÔNG gắn engine)</span></h3>
+<h3>Pump — <span id="manPumpSt">-</span> <span class="small">(xả ra bình/ca, KHÔNG gắn engine)</span></h3>
 <div class="row small">PWM us <input id="manPus" value="1015">
 <button class="btn go" onclick="cmd('pumpmanual '+v('manPus'))">Giữ chạy</button>
 <button class="btn danger" onclick="cmd('pumpmanual off')">Dừng</button>
@@ -2217,7 +2217,7 @@ function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).t
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
  let cardsMan=[['RPM',d.rpm],['EGT',d.egt],['Starter',d.start],['Pump',d.pump],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2]];
  document.getElementById('cardsMan').innerHTML=cardsMan.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
- txt('manIgnSt',d.ign);txt('manV1St',d.v1);txt('manV2St',d.v2);
+ txt('manStartSt',d.start);txt('manPumpSt',d.pump);txt('manIgnSt',d.ign);txt('manV1St',d.v1);txt('manV2St',d.v2);
  document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
  setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('rpmtol',d.cfgRpmTol);setInp('maxegt',d.cfgMaxEgt);setInp('maxgrad',d.cfgMaxGrad);
  setInp('rpmfilter',d.cfgRpmFilter);
