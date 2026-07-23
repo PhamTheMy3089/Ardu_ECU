@@ -2850,6 +2850,7 @@ void printConfig() {
 
 void printHelp() {
   Serial.println("===== COMMANDS =====");
+  Serial.println("apijson -> prints the same JSON as web /api, for a PC-side serial<->web bridge (no other side effects)");
   Serial.println("help | status | showcfg | rpmreset | stop | off");
   Serial.println("clearabort            -> acknowledge abort (needs cool EGT)");
   Serial.println("clearabort force      -> acknowledge abort when EGT sensor is dead (dry-start only after)");
@@ -3301,7 +3302,16 @@ void loop() {
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\n') {
-      if (serialCmdBuf.length()) { handleCommand(serialCmdBuf); serialCmdBuf = ""; }
+      if (serialCmdBuf.length()) {
+        // Read-only status poll for the PC-side serial<->web bridge: bypasses
+        // handleCommand() entirely (same as the real HTTP /api route bypassing it)
+        // so a passive status poll cannot reset the button-start comm-watchdog
+        // exemption or count as "operator just issued a command" the way a real
+        // command does.
+        if (serialCmdBuf == "apijson") Serial.println(webStatusJson());
+        else handleCommand(serialCmdBuf);
+        serialCmdBuf = "";
+      }
     } else if (c != '\r') {
       if (serialCmdBuf.length() < 80) serialCmdBuf += c;
     }
