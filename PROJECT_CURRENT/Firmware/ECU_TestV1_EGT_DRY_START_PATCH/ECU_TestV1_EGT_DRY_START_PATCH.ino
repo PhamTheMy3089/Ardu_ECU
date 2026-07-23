@@ -2469,9 +2469,14 @@ bool flameLost() {
 }
 
 void manAutoFail(const char* reason) {
+  // Cuts glow/fuel/valves only - deliberately does NOT touch startUs, same as the real
+  // startFailed(): the starter must keep running (per spec, stage-1 rule RPM>3000) to
+  // blow unburned fuel out, not shut off with everything else. purgeOutUntilMs lets the
+  // shared applyStarterProtection() hold/restore RPM through the blow-out window if needed.
   ignCmd = false; pumpUs = ESC_SAFE_US; fuelTargetUs = ESC_SAFE_US; fuelValvesAuto(false);
+  purgeOutUntilMs = millis() + cfg.purgeOutMs;
   manAutoActive = false; applyOutputs();
-  Serial.print("MANUAL AUTO START FAILED: "); Serial.println(reason);
+  Serial.print("MANUAL AUTO START FAILED: "); Serial.print(reason); Serial.println(" - starter left running (blow-out), turn off manually when done.");
 }
 
 // Manual page "AUTO START" sequence - mirrors ST_LIGHTOFF's phase 0/1/2 logic exactly
