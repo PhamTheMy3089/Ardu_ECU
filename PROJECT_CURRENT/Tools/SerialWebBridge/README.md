@@ -1,63 +1,71 @@
-# Serial ↔ Web Bridge
+# Bridge GSU — UI điều khiển ECU (Dây hoặc WiFi)
 
-Chạy trang điều khiển **y hệt trang Web của ECU** (cùng file `page.html`,
-tách trực tiếp từ `htmlPage()` trong firmware) nhưng đi qua **cổng Serial**
-(USB-TTL nối vào `GSU_DEBUG_UART1`) thay vì WiFi — dùng khi WiFi/SoftAP của
-ECU không phản hồi (ví dụ nghi ngờ brownout khi starter chạy PWM cao), vẫn
-điều khiển/theo dõi được vì không phụ thuộc WiFi.
+Firmware ESP32 **không còn phục vụ trang web riêng** nữa — nó chỉ còn API JSON
+nhẹ (`/api`, `/cmd`) qua WiFi và lệnh `apijson` qua Serial. Toàn bộ **giao diện
+điều khiển nằm ở công cụ này** (`page.html`), chạy trên PC, và nói chuyện với
+ECU theo **một trong hai kiểu kết nối**:
 
-## Đấu dây
+| Kiểu | Đường truyền | Terminal thấy được gì |
+|------|--------------|------------------------|
+| **Dây** | Serial/USB-TTL vào `GSU_DEBUG_UART1` | TẤT CẢ dòng Serial thô: log khởi động, **log brownout/reset**, phản hồi lệnh |
+| **WiFi** | SoftAP của ECU (`/api`,`/cmd` qua HTTP) | Chỉ Event Log của ECU (WiFi không sống sót qua lúc reset nên không bắt được log đó) |
 
-Xem `GSU_DEBUG_UART1` trong `PROJECT_CURRENT/Docs/COMMISSIONING_GUIDE.md` /
-lịch sử trao đổi trong session — chỉ 3 dây: **GND + TXD↔RX + RXD↔TX** (chéo),
-**không nối VCC, không nối DTR**. Nếu module USB-TTL ra mức 5V trên TXD, cần
-cầu chia áp 1kΩ/2kΩ trước khi vào chân RX của ESP32 (ESP32 không chịu 5V).
+Mở trình duyệt vào `http://127.0.0.1:8080/` sau khi chạy — giao diện giống nhau
+ở cả 2 kiểu, có thêm tab **🖥 Terminal** để đọc dữ liệu ECU và gõ lệnh trực tiếp.
 
 ## Cách 1 — Windows, chạy trực tiếp, không cần cài gì (khuyên dùng)
 
-Dùng `serial_web_bridge.exe` (build sẵn từ `main.go` + `serial_windows.go`,
-không phụ thuộc thư viện ngoài, không cần Python/pip). Double-click để chạy —
-cửa sổ console sẽ hỏi tên cổng COM (vd `COM5`), baud (Enter = mặc định 115200),
-port HTTP (Enter = mặc định 8080), rồi tự mở sẵn sàng — mở trình duyệt vào
-`http://127.0.0.1:8080/`.
+Dùng `serial_web_bridge.exe` (build sẵn từ Go, chỉ dùng thư viện chuẩn, không
+phụ thuộc Python/pip). Double-click để chạy — cửa sổ console sẽ hỏi:
+1. Kiểu kết nối: `wire` (dây) hay `wifi`.
+2. Nếu `wire`: cổng COM (vd `COM5`). Nếu `wifi`: IP của ECU (mặc định `192.168.4.1`).
 
-Cũng có thể chạy kèm tham số để khỏi phải nhập tay:
+Rồi mở `http://127.0.0.1:8080/`.
+
+Chạy nhanh không cần nhập tay:
 ```
-serial_web_bridge.exe COM5 115200 8080
+serial_web_bridge.exe wire COM5
+serial_web_bridge.exe wifi 192.168.4.1
+serial_web_bridge.exe wire COM5 115200 8080     (thêm baud, http-port)
 ```
 
-Muốn tự build lại từ source (nếu bạn sửa `page.html`/thêm tính năng):
+Build lại từ source (khi bạn sửa page.html/thêm tính năng), trên máy có cài Go:
 ```
 GOOS=windows GOARCH=amd64 go build -o serial_web_bridge.exe .
 ```
-(chạy lệnh này trên máy có cài Go — bản .exe kết quả thì không cần Go nữa).
+`page.html` được nhúng thẳng vào .exe lúc build (`//go:embed`), nên sau khi build
+chỉ cần 1 file .exe, không cần kèm page.html.
 
-## Cách 2 — Python (Linux/macOS, hoặc muốn sửa code nhanh)
+## Cách 2 — Python (Linux/macOS, hoặc muốn sửa nhanh)
 
 ```
-pip install pyserial
-python serial_web_bridge.py <cổng-serial> [--baud 115200] [--http-port 8080]
+pip install pyserial          # chỉ cần cho chế độ Dây
+python serial_web_bridge.py               # hỏi kiểu kết nối tương tác
+python serial_web_bridge.py wire /dev/ttyUSB0
+python serial_web_bridge.py wifi 192.168.4.1
 ```
+(Bản Python đọc `page.html` cạnh nó, nên giữ 2 file cùng thư mục.)
 
-Ví dụ:
-```
-python serial_web_bridge.py /dev/ttyUSB0
-python serial_web_bridge.py COM5
-```
+## Đấu dây (chế độ Dây)
 
-Cả 2 cách đều mở `http://127.0.0.1:<port>/` — giao diện/nút bấm y hệt trang
-`http://192.168.4.1/` của ECU.
+`GSU_DEBUG_UART1`: chỉ 3 dây — **GND + TX↔RX + RX↔TX** (chéo), **không nối VCC,
+không nối DTR**. Nếu module USB-TTL ra mức 5V trên TX thì thêm cầu chia áp
+1kΩ/2kΩ trước chân RX của ESP32 (ESP32 không chịu 5V). Không cắm USB on-board
+của ESP32 cùng lúc (chung UART0).
+
+## Endpoint nội bộ (bridge phục vụ)
+
+- `GET /` — trang UI (`page.html`).
+- `GET /api` — trạng thái JSON (dây: từ `apijson`; wifi: proxy từ ECU).
+- `GET /cmd?c=<lệnh>` — gửi lệnh tới ECU.
+- `GET /term?since=<n>` — lấy các dòng terminal mới từ chỉ số `n` (dùng cho tab Terminal).
 
 ## Yêu cầu firmware
 
-Cần lệnh Serial `apijson` (đã có sẵn trong
-`ECU_TestV1_EGT_DRY_START_PATCH.ino`) — in ra đúng chuỗi JSON mà route
-`/api` của web server trả về, dùng riêng cho bridge này (không tính là "lệnh
-điều khiển" nên không ảnh hưởng comm-watchdog/nút bấm như một lệnh thật).
+- Lệnh Serial `apijson` (in ra JSON giống `/api`) — có sẵn trong
+  `ECU_TestV1_EGT_DRY_START_PATCH.ino`, dùng cho chế độ Dây.
+- SoftAP + `/api` + `/cmd` — có sẵn, dùng cho chế độ WiFi.
 
-## Giới hạn
-
-- Đây là công cụ dự phòng khi WiFi có sự cố, không thay thế theo dõi qua
-  Serial Monitor thường (không hiện các dòng `Serial.println` dạng log/chữ,
-  chỉ hiện đúng những gì trang Web hiện vốn hiển thị).
-- Không chạy đồng thời 2 bridge/2 Serial Monitor trên cùng 1 cổng COM.
+> Lưu ý: phần gọi cổng COM của Windows (kernel32) chưa chạy thử trên máy Windows
+> thật từ môi trường build; logic HTTP/JSON/terminal đã test qua cổng serial ảo.
+> Nếu mở cổng COM báo lỗi, kiểm tra cổng có bị chương trình khác giữ không.

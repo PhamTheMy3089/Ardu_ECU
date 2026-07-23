@@ -387,7 +387,6 @@ void sdLogEvent(const String& msg);
 void flushSdEventQueue();
 void printSdStatus();
 String webStatusJson();
-String htmlPage();
 
 int pumpUs = ESC_SAFE_US, startUs = ESC_SAFE_US;
 int fuelTargetUs = ESC_SAFE_US;   // Ardu_ECU-style target; pumpUs is the actual output now
@@ -1979,291 +1978,19 @@ String webStatusJson() {
   return s;
 }
 
-String htmlPage() {
-  return String(R"HTML(
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ECU Test V1</title>
-<style>
-body{margin:0;background:#0b1020;color:#e9eefc;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1100px;margin:auto;padding:16px}
-h1{margin:8px 0 4px;font-size:24px}.sub{color:#9fb0d0;margin-bottom:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
-.card{background:#151d33;border:1px solid #283451;border-radius:14px;padding:12px;box-shadow:0 2px 10px #0005}.label{color:#9fb0d0;font-size:12px;text-transform:uppercase}.val{font-size:22px;font-weight:700;margin-top:4px}.warn{color:#ffcc66}.bad{color:#ff7777}.ok{color:#7dffa1}
-.btns{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.btn{border:0;border-radius:10px;padding:10px 12px;background:#293855;color:#fff;font-weight:700}.danger{background:#8a2430}.go{background:#1e7042}.arm{background:#806020}.test{background:#244c80}
-table{width:100%;border-collapse:collapse;margin-top:8px}td,th{border-bottom:1px solid #283451;padding:8px;text-align:left}.small{font-size:12px;color:#9fb0d0}.log{background:#080c18;border-radius:10px;padding:10px;min-height:80px;font-family:monospace;font-size:12px;color:#c7d5ff}
-input{background:#0b1020;color:#fff;border:1px solid #405071;border-radius:8px;padding:8px;width:90px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}.pill{display:inline-block;border-radius:999px;padding:4px 9px;background:#263752}.pass{background:#145c34}.fail{background:#6a202b}.run{background:#6b551d}
-.tabs{display:flex;gap:6px;margin:14px 0 10px}.tabb{flex:1;padding:12px 6px;border:0;background:#151d33;color:#9fb0d0;font-weight:700;font-size:15px;border-radius:12px;cursor:pointer}.tabb.on{background:#244c80;color:#fff;box-shadow:0 2px 10px #0006}
-.panel{display:none}.panel.on{display:block}
-.gwrap{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}.gauge{background:#151d33;border:1px solid #283451;border-radius:14px;padding:8px 14px 4px;text-align:center;flex:1;min-width:150px;max-width:260px}.gt{color:#9fb0d0;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
-.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:10px 0}.chip{border-radius:999px;padding:6px 12px;background:#263752;font-weight:700;font-size:13px}
-summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px 0 4px}
-</style></head><body><div class="wrap">
-<h1>ECU Test V1</h1><div class="sub">SoftAP ECU_TestV1 / admin1234 — http://192.168.4.1 · Điều khiển &amp; test hoàn toàn qua web</div>
-
-<div class="gwrap">
-<div class="gauge"><div class="gt">RPM</div>
-<svg viewBox="0 0 120 72" width="100%" style="max-width:230px">
-<path d="M10,62 A50,50 0 0,1 110,62" fill="none" stroke="#283451" stroke-width="11" stroke-linecap="round"/>
-<path id="g_rpm" d="M10,62 A50,50 0 0,1 110,62" fill="none" stroke="#7dffa1" stroke-width="11" stroke-linecap="round" stroke-dasharray="157" stroke-dashoffset="157"/>
-<text id="g_rpm_t" x="60" y="58" text-anchor="middle" font-size="19" font-weight="700" fill="#e9eefc">0</text>
-</svg></div>
-<div class="gauge"><div class="gt">EGT °C</div>
-<svg viewBox="0 0 120 72" width="100%" style="max-width:230px">
-<path d="M10,62 A50,50 0 0,1 110,62" fill="none" stroke="#283451" stroke-width="11" stroke-linecap="round"/>
-<path id="g_egt" d="M10,62 A50,50 0 0,1 110,62" fill="none" stroke="#7dffa1" stroke-width="11" stroke-linecap="round" stroke-dasharray="157" stroke-dashoffset="157"/>
-<text id="g_egt_t" x="60" y="58" text-anchor="middle" font-size="19" font-weight="700" fill="#e9eefc">0</text>
-</svg></div>
-</div>
-<div class="chips" id="chips"></div>
-
-<div class="tabs">
-<button class="tabb on" id="btab_run" onclick="tab('run')">▶ Run</button>
-<button class="tabb" id="btab_test" onclick="tab('test')">🧪 Testing</button>
-<button class="tabb" id="btab_man" onclick="tab('man')">🔧 Manual</button>
-<button class="tabb" id="btab_set" onclick="tab('set')">⚙ Settings</button>
-</div>
-
-<div class="panel on" id="tab_run">
-<div class="grid" id="cards"></div>
-
-<h2>Controls</h2><div class="btns">
-<button class="btn arm" onclick="cmd('arm2')">ARM 10s</button>
-<button class="btn go" onclick="cmd('startidle')">START IDLE</button>
-<button class="btn go" onclick="cmd('autostart on')">AutoStart ON</button>
-<button class="btn" onclick="cmd('autostart off')">AutoStart OFF</button>
-<button class="btn danger" onclick="cmd('stop')">SOFT STOP</button>
-<button class="btn danger" onclick="cmd('off')">SAFE OFF</button>
-<button class="btn" onclick="if(confirm('Clear abort?'))cmd('clearabort')">CLEAR ABORT</button>
-<button class="btn" onclick="cmd('rpmreset')">RPM RESET</button>
-</div>
-<div class="row small">EGT start mode: <b id="swEgtDry">-</b>
-<button class="btn" onclick="cmd('set egtstart dry')">EGT Dry</button>
-<button class="btn" onclick="cmd('set egtstart strict')">EGT Strict</button></div>
-</div><!-- /run -->
-
-<div class="panel" id="tab_test">
-<h2>Test Wizard</h2><div class="small">Pump Prime: rút ống nhiên liệu khỏi engine và xả ra bình/ca trước khi test.</div>
-<div class="btns">
-<button class="btn test" onclick="cmd('test egt')">EGT</button><button class="btn test" onclick="cmd('test rpm_noise')">RPM noise</button><button class="btn test" onclick="cmd('test ign')">IGN</button><button class="btn test" onclick="cmd('test starter')">Starter</button><button class="btn test" onclick="cmd('test starter_ign')">Starter+IGN EMI</button><button class="btn test" onclick="cmd('test valve1')">Valve 1</button><button class="btn test" onclick="cmd('test valve2')">Valve 2</button><button class="btn test" onclick="cmd('test pump')">Pump prime</button><button class="btn test" onclick="cmd('confirmkill')">Confirm kill</button><button class="btn" onclick="cmd('resetcheck')">Reset checklist</button>
-</div><table><thead><tr><th>Step</th><th>Result</th><th>Note</th></tr></thead><tbody id="ck"></tbody></table>
-
-<h2>Manual Actuator Tests <span class="small">(bench — không cần ARM)</span></h2>
-<div class="row small">Starter — PWM us <input id="sus" value="1200"> Duration ms <input id="sms" value="3000">
-<button class="btn test" onclick="cmd('starttest '+v('sus')+' '+v('sms'))">Run starter</button></div>
-<div class="row small">Pump (xả ra bình/ca, KHÔNG gắn engine) — PWM us <input id="pus" value="1160"> Duration ms <input id="pms" value="1500">
-<button class="btn test" onclick="cmd('pumptest '+v('pus')+' '+v('pms'))">Run pump</button></div>
-<div class="row small">Igniter/glow — Duration ms <input id="igms" value="1000">
-<button class="btn test" onclick="cmd('ignpulse '+v('igms'))">Pulse glow</button></div>
-<div class="row small">Valve 1 (Start solenoid) —
-<button class="btn test" onclick="cmd('valve1 on')">ON</button>
-<button class="btn danger" onclick="cmd('valve1 off')">OFF</button>
-&nbsp;&nbsp;Valve 2 (Main oil) —
-<button class="btn test" onclick="cmd('valve2 on')">ON</button>
-<button class="btn danger" onclick="cmd('valve2 off')">OFF</button>
-<span class="small">(không tự tắt — nhớ bấm OFF sau khi test)</span></div>
-</div><!-- /test -->
-
-<div class="panel" id="tab_man">
-<h2>Điều khiển tay (Manual) <span class="small">— giữ nguyên tới khi bạn tắt, không tự động</span></h2>
-<div class="btns"><button class="btn danger" onclick="cmd('off')">🛑 SAFE OFF — TẮT HẾT NGAY</button></div>
-
-<h3>AUTO START — <span id="manAutoSt">-</span></h3>
-<div class="row small">
-<button class="btn go" onclick="cmd('manauto on')">▶ AUTO START</button>
-<button class="btn danger" onclick="cmd('manauto off')">■ Hủy</button>
-<span class="small">Yêu cầu RPM ≥ ignArmRpm (Settings) trước. Tự mở Valve1 + bơm mức min (introus) + bật glow, chờ bắt lửa thật (EGT≥ignitionThresholdC &amp; đang tăng ≥lightoffrise, giữ lightoffconfirmms) → mở Valve2 → chờ postignitionheatms → đóng Valve1 → chờ flameprovems xác nhận lửa còn cháy → tắt glow.</span></div>
-
-<h3>Starter — <span id="manStartSt">-</span></h3>
-<div class="row small">PWM us <input id="manSus" value="1200">
-<button class="btn go" onclick="cmd('startmanual '+v('manSus'))">Giữ chạy</button>
-<button class="btn danger" onclick="cmd('startmanual off')">Dừng</button>
-<button class="btn" onclick="bump('manSus',-10,'startmanual')">-10</button>
-<button class="btn" onclick="bump('manSus',10,'startmanual')">+10</button></div>
-
-<h3>Pump — <span id="manPumpSt">-</span> <span class="small">(xả ra bình/ca, KHÔNG gắn engine)</span></h3>
-<div class="row small">PWM us <input id="manPus" value="1015">
-<button class="btn go" onclick="cmd('pumpmanual '+v('manPus'))">Giữ chạy</button>
-<button class="btn danger" onclick="cmd('pumpmanual off')">Dừng</button>
-<button class="btn" onclick="bump('manPus',-1,'pumpmanual')">-1</button>
-<button class="btn" onclick="bump('manPus',1,'pumpmanual')">+1</button></div>
-
-<h3>Glow plug — <span id="manIgnSt">-</span></h3>
-<div class="row small">
-<button class="btn go" onclick="cmd('ign on')">ON</button>
-<button class="btn danger" onclick="cmd('ign off')">OFF</button>
-<span class="small">Tự tắt khi có bắt lửa thật (như LIGHTOFF): EGT&gt;=ignitionThresholdC &amp; dEGT&gt;=lightoffrise, giữ lightoffconfirmms (chỉnh ở Settings)</span></div>
-
-<h3>Valve 1 (Start solenoid) — <span id="manV1St">-</span></h3>
-<div class="row small">
-<button class="btn go" onclick="cmd('valve1 on')">ON</button>
-<button class="btn danger" onclick="cmd('valve1 off')">OFF</button></div>
-
-<h3>Valve 2 (Main oil) — <span id="manV2St">-</span></h3>
-<div class="row small">
-<button class="btn go" onclick="cmd('valve2 on')">ON</button>
-<button class="btn danger" onclick="cmd('valve2 off')">OFF</button></div>
-
-<div class="grid" id="cardsMan"></div>
-</div><!-- /man -->
-
-<div class="panel" id="tab_set">
-<h2>Config trên thẻ SD</h2>
-<div class="row small">File trên SD: <b id="cfgOnSd">-</b> · nạp lúc boot: <b id="cfgLoaded">-</b></div>
-<div class="btns">
-<button class="btn go" onclick="if(confirm('Lưu toàn bộ config hiện tại vào thẻ SD? Lần sau bật máy sẽ tự nạp lại.'))cmd('savecfg')">💾 Lưu config vào SD</button>
-<button class="btn" onclick="if(confirm('Nạp lại config từ SD, ghi đè giá trị đang chỉnh?'))cmd('loadcfg')">↻ Nạp lại từ SD</button>
-</div>
-<h2>Tune — RPM &amp; Safety <span class="small">(tự nạp từ config; PWM/limit chỉ chỉnh khi WAITING/ABORTED)</span></h2><div class="row small">
-Idle RPM <input id="idlerpm" value="42000"><button class="btn" onclick="cmd('set idlerpm '+v('idlerpm'))">Set</button>
-Max RPM <input id="maxrpm" value="110000"><button class="btn" onclick="cmd('set maxrpm '+v('maxrpm'))">Set</button>
-RPM tol <input id="rpmtol" value="5000"><button class="btn" onclick="cmd('set rpmtol '+v('rpmtol'))">Set</button>
-Throttle <input id="thr" value="0"><button class="btn" onclick="cmd('set throttle '+v('thr'))">Set</button>
-</div><div class="row small">
-Max EGT <input id="maxegt" value="680"><button class="btn" onclick="cmd('set maxegt '+v('maxegt'))">Set</button>
-Max grad C/s <input id="maxgrad" value="200"><button class="btn" onclick="cmd('set maxgrad '+v('maxgrad'))">Set</button>
-</div>
-
-<h2>Tune — RPM sensor</h2><div class="row small">
-PPR (xung/vòng): <b id="ppr">-</b>
-<button class="btn" onclick="cmd('set ppr 1')">1</button>
-<button class="btn" onclick="cmd('set ppr 2')">2</button>
-&nbsp; RPM filter us <input id="rpmfilter" value="120"><button class="btn" onclick="cmd('set rpmfilter '+v('rpmfilter'))">Set</button>
-&nbsp; Edge: <b id="rpmedge">-</b>
-<button class="btn" onclick="cmd('set rpmedge rising')">Rising</button>
-<button class="btn" onclick="cmd('set rpmedge falling')">Falling</button>
-</div>
-
-<h2>Tune — Starter &amp; Fuel PWM</h2><div class="row small">
-Purge us <input id="purgeus" value="1100"><button class="btn" onclick="cmd('set purgeus '+v('purgeus'))">Set</button>
-Spin us <input id="spinus" value="1200"><button class="btn" onclick="cmd('set spinus '+v('spinus'))">Set</button>
-Assist us <input id="assistus" value="1200"><button class="btn" onclick="cmd('set assistus '+v('assistus'))">Set</button>
-</div><div class="row small">
-Intro us <input id="introus" value="1160"><button class="btn" onclick="cmd('set intro '+v('introus'))">Set</button>
-Idle us <input id="idleus" value="1175"><button class="btn" onclick="cmd('set idleus '+v('idleus'))">Set</button>
-Max us <input id="maxus" value="1260"><button class="btn" onclick="cmd('set maxus '+v('maxus'))">Set</button>
-Pump test us <input id="pumptestus" value="1160"><button class="btn" onclick="cmd('set pumptestus '+v('pumptestus'))">Set</button>
-</div>
-
-<h2>Tune — Start sequence</h2>
-<div class="small">PURGE: starter giữ ESC_SAFE ("arm hold ms") cho ESC arm xong, rồi giữ nguyên "ramp from" trong "purge stable ms" cho starter ổn định, rồi mới tăng +1µs mỗi "ramp step ms", tới khi RPM &gt; "ign arm RPM", giữ (purge dwell = Advanced). LIGHTOFF thành công khi EGT ≥ 100°C VÀ dEGT/dt ≥ "lightoff rise" giữ "lightoff confirm ms". Mất lửa: EGT tụt &gt; "flameout drop" trong 2s hoặc &lt;100°C.</div>
-<div class="row small">
-Ramp from us <input id="rampfromus" value="1150"><button class="btn" onclick="cmd('set rampfromus '+v('rampfromus'))">Set</button>
-Ramp to us (assist max) <input id="ramptous" value="1450"><button class="btn" onclick="cmd('set ramptous '+v('ramptous'))">Set</button>
-Ramp step ms <input id="rampstepms" value="250"><button class="btn" onclick="cmd('set rampstepms '+v('rampstepms'))">Set</button>
-ESC arm hold ms <input id="escarmholdms" value="2000"><button class="btn" onclick="cmd('set escarmholdms '+v('escarmholdms'))">Set</button>
-Purge stable ms <input id="purgestablems" value="10000"><button class="btn" onclick="cmd('set purgestablems '+v('purgestablems'))">Set</button>
-</div><div class="row small">
-Ign arm RPM <input id="ignarmrpm" value="3000"><button class="btn" onclick="cmd('set ignarmrpm '+v('ignarmrpm'))">Set</button>
-Spinup timeout ms <input id="spinuptimeoutms" value="45000"><button class="btn" onclick="cmd('set spinuptimeoutms '+v('spinuptimeoutms'))">Set</button>
-Fuel delay ms <input id="fueldelayms" value="1000"><button class="btn" onclick="cmd('set fueldelayms '+v('fueldelayms'))">Set</button>
-</div><div class="row small">
-Lightoff rise C/s <input id="lightoffrise" value="15"><button class="btn" onclick="cmd('set lightoffrise '+v('lightoffrise'))">Set</button>
-Lightoff confirm ms <input id="lightoffconfirmms" value="700"><button class="btn" onclick="cmd('set lightoffconfirmms '+v('lightoffconfirmms'))">Set</button>
-Flame prove ms <input id="flameprovems" value="2000"><button class="btn" onclick="cmd('set flameprovems '+v('flameprovems'))">Set</button>
-</div><div class="row small">
-Flameout drop C <input id="flameoutdropc" value="10"><button class="btn" onclick="cmd('set flameoutdropc '+v('flameoutdropc'))">Set</button>
-Accel hold ms <input id="accelholdms" value="5000"><button class="btn" onclick="cmd('set accelholdms '+v('accelholdms'))">Set</button>
-Accel step us <input id="accelstepus" value="1"><button class="btn" onclick="cmd('set accelstepus '+v('accelstepus'))">Set</button>
-Purge-out ms <input id="purgeoutms" value="5000"><button class="btn" onclick="cmd('set purgeoutms '+v('purgeoutms'))">Set</button>
-</div>
-
-<h2>Bảo vệ động cơ / starter</h2>
-<div class="small">EGT &gt; Cool target (90°C) mà RPM &lt; "hot spin min" thì starter tự chạy (chống khí nóng lan lên đầu máy khi động cơ nóng dừng). RPM &gt; "starter max" thì starter tắt (chống quá tải starter).</div>
-<div class="row small">
-Starter max RPM <input id="startermaxrpm" value="15000"><button class="btn" onclick="cmd('set startermaxrpm '+v('startermaxrpm'))">Set</button>
-Hot spin min RPM <input id="hotspinminrpm" value="3000"><button class="btn" onclick="cmd('set hotspinminrpm '+v('hotspinminrpm'))">Set</button>
-Hot spin us <input id="hotspinus" value="1200"><button class="btn" onclick="cmd('set hotspinus '+v('hotspinus'))">Set</button>
-</div>
-
-<details><summary><b>Advanced — Timing, cooldown &amp; interlocks</b></summary>
-<div class="row small">
-Accel ms <input id="accelms" value="200"><button class="btn" onclick="cmd('set accelms '+v('accelms'))">Set</button>
-Decel ms <input id="decelms" value="200"><button class="btn" onclick="cmd('set decelms '+v('decelms'))">Set</button>
-Low accel ms <input id="lowaccelms" value="400"><button class="btn" onclick="cmd('set lowaccelms '+v('lowaccelms'))">Set</button>
-Low decel ms <input id="lowdecelms" value="400"><button class="btn" onclick="cmd('set lowdecelms '+v('lowdecelms'))">Set</button>
-</div><div class="row small">
-Dry start ms <input id="drystartms" value="5000"><button class="btn" onclick="cmd('set drystartms '+v('drystartms'))">Set</button>
-Accel→idle ms <input id="acceltoidlems" value="20000"><button class="btn" onclick="cmd('set acceltoidlems '+v('acceltoidlems'))">Set</button>
-</div><div class="row small">
-Cool target C <input id="cooltarget" value="120"><button class="btn" onclick="cmd('set cooltarget '+v('cooltarget'))">Set</button>
-Cool starter us <input id="coolstarter" value="1100"><button class="btn" onclick="cmd('set coolstarter '+v('coolstarter'))">Set</button>
-Cool min ms <input id="coolminms" value="5000"> timeout ms <input id="cooltimeoutms" value="45000">
-<button class="btn" onclick="cmd('set cooldownms '+v('coolminms')+' '+v('cooltimeoutms'))">Set</button>
-</div><div class="row small">
-Comm timeout ms <input id="commtimeout" value="8000"><button class="btn" onclick="cmd('set commtimeout '+v('commtimeout'))">Set</button>
-</div><div class="row small">
-Checklist interlock: <b id="swChecklist">-</b>
-<button class="btn" onclick="cmd('set checklist on')">ON</button>
-<button class="btn danger" onclick="cmd('set checklist off')">OFF</button>
-&nbsp; Comm watchdog: <b id="swCommWd">-</b>
-<button class="btn" onclick="cmd('set commwatchdog on')">ON</button>
-<button class="btn danger" onclick="cmd('set commwatchdog off')">OFF</button>
-</div><div class="row small">
-SD logging: <b id="swSdlog">-</b>
-<button class="btn" onclick="cmd('set sdlog on')">ON</button>
-<button class="btn" onclick="cmd('set sdlog off')">OFF</button>
-<button class="btn" onclick="cmd('sdtest')">SD test write</button>
-</div>
-</details>
-</div><!-- /settings -->
-
-<h2>Event Log</h2><div class="log" id="logs"></div>
-</div><script>
-function v(id){return document.getElementById(id).value}
-function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,200))}
-function bump(id,delta,prefix){var e=document.getElementById(id);var val=(parseInt(e.value)||1000)+delta;if(val<1000)val=1000;if(val>2000)val=2000;e.value=val;cmd(prefix+' '+val);}
-function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
-function setInp(id,val){var e=document.getElementById(id);if(e&&val!==undefined&&document.activeElement!==e)e.value=val;}
-function txt(id,val){var e=document.getElementById(id);if(e&&val!==undefined)e.textContent=val;}
-function tab(n){['run','test','man','set'].forEach(function(t){
- document.getElementById('tab_'+t).classList.toggle('on',t==n);
- document.getElementById('btab_'+t).classList.toggle('on',t==n);});}
-function gauge(arc,tid,val,max,warnFrac){
- var f=max>0?Math.max(0,Math.min(1,val/max)):0;var L=157;
- var a=document.getElementById(arc);a.style.strokeDashoffset=(L*(1-f)).toFixed(1);
- a.setAttribute('stroke', f>=warnFrac?'#ff7777':(f>=0.75?'#ffcc66':'#7dffa1'));
- document.getElementById(tid).textContent=Math.round(val);}
-function chip(lbl,val,cls){return '<span class="chip '+(cls||'')+'">'+lbl+': '+val+'</span>';}
-function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).then(d=>{
- gauge('g_rpm','g_rpm_t',d.rpmv||0,parseInt(d.cfgMaxRpm)||110000,1.05);
- gauge('g_egt','g_egt_t',d.egtv||0,parseInt(d.cfgMaxEgt)||680,0.85);
- var abn=d.abort&&d.abort!='NONE'&&d.abort!='';
- document.getElementById('chips').innerHTML=
-  chip('MODE',d.mode)+chip('STAGE',d.stage)+
-  chip('ARM',d.arm,d.arm=='ARMED'?'run':'')+
-  chip('AUTO',d.auto,d.auto=='ON'?'run':'')+
-  chip('NOISE',d.rnoise,d.rnoise=='CLEAN'?'pass':(d.rnoise=='NO_SIGNAL'?'':'fail'))+
-  chip('CHECK',d.checklistOk,d.checklistOk=='PASS'?'pass':'fail')+
-  (abn?chip('ABORT',d.abort,'fail'):'');
- let cards=[['RPM',d.rpm],['EGT',d.egt],['dEGT',d.degt],['RPM Target',d.rtgt],['RPM Detail',d.rpmDetail],['Pump',d.pump],['Fuel Target',d.ftgt],['Starter',d.start],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2],['Throttle',d.thr],['SD',d.sd]];
- document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
- let cardsMan=[['RPM',d.rpm],['EGT',d.egt],['Starter',d.start],['Pump',d.pump],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2]];
- document.getElementById('cardsMan').innerHTML=cardsMan.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
- txt('manStartSt',d.start);txt('manPumpSt',d.pump);txt('manIgnSt',d.ign);txt('manV1St',d.v1);txt('manV2St',d.v2);txt('manAutoSt',d.manAuto);
- document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
- setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('rpmtol',d.cfgRpmTol);setInp('maxegt',d.cfgMaxEgt);setInp('maxgrad',d.cfgMaxGrad);
- setInp('rpmfilter',d.cfgRpmFilter);
- setInp('purgeus',d.cfgPurgeUs);setInp('spinus',d.cfgSpinUs);setInp('assistus',d.cfgAssistUs);
- setInp('introus',d.cfgIntroUs);setInp('idleus',d.cfgIdleUs);setInp('maxus',d.cfgMaxUs);setInp('pumptestus',d.cfgPumpTestUs);
- setInp('rampfromus',d.cfgRampFromUs);setInp('ramptous',d.cfgRampToUs);setInp('rampstepms',d.cfgRampStepMs);setInp('escarmholdms',d.cfgEscArmHoldMs);setInp('purgestablems',d.cfgPurgeStableMs);
- setInp('ignarmrpm',d.cfgIgnArmRpm);setInp('spinuptimeoutms',d.cfgSpinupTimeoutMs);setInp('fueldelayms',d.cfgFuelDelayMs);
- setInp('lightoffrise',d.cfgLightOffRise);setInp('lightoffconfirmms',d.cfgLightOffConfirmMs);setInp('flameprovems',d.cfgFlameProveMs);
- setInp('flameoutdropc',d.cfgFlameOutDropC);setInp('accelholdms',d.cfgAccelHoldMs);setInp('accelstepus',d.cfgAccelStepUs);setInp('purgeoutms',d.cfgPurgeOutMs);
- setInp('startermaxrpm',d.cfgStarterMaxRpm);setInp('hotspinminrpm',d.cfgHotSpinMinRpm);setInp('hotspinus',d.cfgHotSpinUs);
- setInp('accelms',d.cfgAccelMs);setInp('decelms',d.cfgDecelMs);setInp('lowaccelms',d.cfgLowAccelMs);setInp('lowdecelms',d.cfgLowDecelMs);
- setInp('drystartms',d.cfgDryStartMs);setInp('acceltoidlems',d.cfgAccelToIdleMs);
- setInp('cooltarget',d.cfgCoolTarget);setInp('coolstarter',d.cfgCoolStarter);setInp('coolminms',d.cfgCoolMinMs);setInp('cooltimeoutms',d.cfgCoolTimeoutMs);
- setInp('commtimeout',d.cfgCommTimeout);
- txt('ppr',d.cfgPpr);txt('rpmedge',d.cfgRpmEdge);txt('swEgtDry',d.swEgtDry);
- txt('swChecklist',d.swChecklist);txt('swCommWd',d.swCommWd);txt('swSdlog',d.swSdlog);
- txt('cfgOnSd',d.cfgOnSd);txt('cfgLoaded',d.cfgLoaded);
- document.getElementById('logs').innerHTML=d.logs||'';});}
-setInterval(load,700);load();
-</script></body></html>
-)HTML");
-}
 
 void setupWebServer() {
   if (webRoutesReady) return;
-  server.on("/", []() { server.send(200, "text/html; charset=utf-8", htmlPage()); });
+  // The ECU no longer serves its own dashboard HTML - the UI now lives in the PC-side
+  // SerialWebBridge tool, which talks to this firmware over Serial OR over WiFi via the
+  // machine-facing /api and /cmd endpoints below. "/" just returns a short pointer so a
+  // stray browser hitting http://192.168.4.1 isn't left with a blank/404 page.
+  server.on("/", []() {
+    server.send(200, "text/plain; charset=utf-8",
+      "ECU Test V1 - JSON API only (no built-in web UI).\n"
+      "Dung cong cu SerialWebBridge (ket noi qua Day/Serial hoac WiFi) de dieu khien.\n"
+      "Endpoints: GET /api (trang thai JSON), GET /cmd?c=<lenh>.\n");
+  });
   server.on("/api", []() {
     // Only a poll from a VISIBLE dashboard tab counts as operator presence for the
     // comm watchdog. The page sends act=0 when hidden/backgrounded (phone locked,
@@ -2288,8 +2015,8 @@ void startWebServer() {
   WiFi.softAP(WEB_SSID, WEB_PASS);
   server.begin();
   webStarted = true;
-  addLog(String("WEB ON ") + WEB_SSID + " http://192.168.4.1");
-  Serial.print("Web UI: SSID="); Serial.print(WEB_SSID); Serial.println(" PASS=admin1234 URL=http://192.168.4.1");
+  addLog(String("WIFI API ON ") + WEB_SSID + " http://192.168.4.1");
+  Serial.print("WiFi JSON API: SSID="); Serial.print(WEB_SSID); Serial.println(" PASS=admin1234 URL=http://192.168.4.1 (/api,/cmd) - dung SerialWebBridge lam UI");
 }
 
 void stopWebServer() {

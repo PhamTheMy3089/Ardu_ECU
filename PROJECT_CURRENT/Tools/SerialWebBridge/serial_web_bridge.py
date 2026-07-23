@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-Serial<->Web bridge for the ECU_TestV1_EGT_DRY_START_PATCH firmware.
+Bridge GSU cho firmware ECU_TestV1_EGT_DRY_START_PATCH.
 
-Serves the exact same dashboard page the ECU's own WiFi web server serves,
-but talks to the ECU over a Serial/USB-TTL link (GSU_DEBUG_UART1) instead of
-WiFi. Useful as a control channel that keeps working if the ECU's WiFi/SoftAP
-becomes unresponsive (e.g. under a brownout-adjacent voltage sag), since it
-never depends on the ESP32's WiFi radio at all.
+Phục vụ giao diện điều khiển (page.html, UI duy nhất - firmware ESP32 không còn
+trang web riêng) trên PC, và nói chuyện với ECU theo MỘT trong hai kiểu kết nối:
 
-Requires: pip install pyserial
+  * Dây (Serial/USB-TTL nối vào GSU_DEBUG_UART1): thấy được TẤT CẢ dữ liệu Serial
+    thô (log khởi động/brownout, phản hồi lệnh) trong tab Terminal.
+  * WiFi (SoftAP của ECU): gọi thẳng /api và /cmd qua HTTP. Terminal chỉ thấy
+    Event Log của ECU (WiFi không sống sót qua lúc reset nên không bắt được log đó).
 
-Usage:
-    python serial_web_bridge.py <serial-port> [--baud 115200] [--http-port 8080]
+Cần: pip install pyserial  (chỉ cho chế độ Dây; chế độ WiFi dùng thư viện chuẩn).
 
-Example:
-    python serial_web_bridge.py COM5
-    python serial_web_bridge.py /dev/ttyUSB0 --baud 115200 --http-port 8080
-
-Then open http://127.0.0.1:8080/ in a browser - it is the same page/controls
-as the ECU's own http://192.168.4.1/, just routed over Serial.
+Chạy:
+    python serial_web_bridge.py                      # hỏi kiểu kết nối tương tác
+    python serial_web_bridge.py wire COM5            # dây, cổng COM5
+    python serial_web_bridge.py wifi 192.168.4.1     # wifi, IP của ECU
+Tùy chọn thêm: [--baud 115200] [--http-port 8080]
+Rồi mở http://127.0.0.1:8080/
 """
 import argparse
 import json
@@ -26,123 +25,236 @@ import os
 import sys
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
-
-try:
-    import serial
-except ImportError:
-    print("Missing dependency: pip install pyserial", file=sys.stderr)
-    sys.exit(1)
+from urllib.parse import urlparse, parse_qs, quote
 
 PAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "page.html")
-STATUS_TIMEOUT_S = 1.0     # how long to wait for the "apijson" reply line
-DRAIN_AFTER_CMD_S = 0.15   # time to drain a command's human-readable Serial.println output
+TERM_MAX = 2000            # số dòng terminal giữ lại tối đa
+STATUS_POLL_S = 0.4        # chu kỳ gửi "apijson" ở chế độ dây
+WIFI_TIMEOUT_S = 1.5
 
-ser_lock = threading.Lock()
-ser = None  # serial.Serial, opened in main()
-last_status_json = json.dumps({"error": "no response from ECU yet"})
+state_lock = threading.Lock()
+last_status = '{"error":"chua co du lieu tu ECU"}'
+term_lines = []            # ring buffer các dòng terminal (log/phản hồi thô)
+term_base = 0              # số dòng đã bị cắt khỏi đầu ring buffer (để đánh chỉ số tuyệt đối)
+
+mode = "wire"
+conn_state = "-"
+ser = None                 # serial.Serial ở chế độ dây
+wifi_base = ""             # http://<ip> ở chế độ wifi
 
 
-def _read_line(timeout_s):
-    """Read one line from the serial port within timeout_s, or return None."""
-    deadline = time.time() + timeout_s
+def add_term(line):
+    global term_base
+    with state_lock:
+        term_lines.append(line)
+        if len(term_lines) > TERM_MAX:
+            drop = len(term_lines) - TERM_MAX
+            del term_lines[:drop]
+            term_base += drop
+
+
+def is_status_json(line):
+    return line.startswith("{") and '"mode"' in line
+
+
+# ---------------- Chế độ DÂY (Serial) ----------------
+
+def wire_reader():
+    """Đọc liên tục từng dòng Serial: dòng JSON trạng thái -> last_status;
+    còn lại -> terminal buffer."""
+    global last_status
     buf = bytearray()
-    while time.time() < deadline:
-        chunk = ser.read(ser.in_waiting or 1)
-        if chunk:
-            buf.extend(chunk)
-            if b"\n" in buf:
-                line, _, _rest = buf.partition(b"\n")
-                return line.decode("utf-8", errors="replace").strip()
-    return None
-
-
-def poll_status():
-    """Send 'apijson' and return the JSON text the firmware prints back."""
-    global last_status_json
-    with ser_lock:
-        ser.reset_input_buffer()
-        ser.write(b"apijson\n")
-        line = _read_line(STATUS_TIMEOUT_S)
-    if line and line.startswith("{"):
-        last_status_json = line
-    return last_status_json
-
-
-def send_command(cmd: str):
-    """Send a plain command (mirrors the web /cmd?c=... route) and drain its
-    human-readable Serial.println() reply so it doesn't pollute the next
-    status poll."""
-    with ser_lock:
-        ser.write(cmd.encode("utf-8") + b"\n")
-        deadline = time.time() + DRAIN_AFTER_CMD_S
-        while time.time() < deadline:
-            n = ser.in_waiting
-            if n:
-                ser.read(n)
+    while True:
+        try:
+            chunk = ser.read(ser.in_waiting or 1)
+        except Exception as e:
+            add_term("[bridge] loi doc serial: %s" % e)
+            time.sleep(0.5)
+            continue
+        if not chunk:
+            continue
+        buf.extend(chunk)
+        while b"\n" in buf:
+            raw, _, rest = buf.partition(b"\n")
+            buf = bytearray(rest)
+            line = raw.decode("utf-8", errors="replace").rstrip("\r")
+            if not line:
+                continue
+            if is_status_json(line):
+                with state_lock:
+                    last_status = line
             else:
-                time.sleep(0.01)
+                add_term(line)
 
+
+def wire_poller():
+    """Định kỳ xin trạng thái JSON."""
+    while True:
+        try:
+            ser.write(b"apijson\n")
+        except Exception:
+            pass
+        time.sleep(STATUS_POLL_S)
+
+
+def wire_send(cmd):
+    try:
+        ser.write(cmd.encode("utf-8") + b"\n")
+    except Exception as e:
+        add_term("[bridge] loi gui lenh: %s" % e)
+
+
+# ---------------- Chế độ WiFi (HTTP proxy) ----------------
+
+def wifi_get(path):
+    url = wifi_base + path
+    with urllib.request.urlopen(url, timeout=WIFI_TIMEOUT_S) as r:
+        return r.read().decode("utf-8", errors="replace")
+
+
+def wifi_status_poller():
+    """Poll /api để cập nhật trạng thái + rút Event Log vào terminal."""
+    global last_status, conn_state
+    last_logs = ""
+    while True:
+        try:
+            js = wifi_get("/api?act=1")
+            with state_lock:
+                last_status = js
+            conn_state = "OK"
+            try:
+                logs = json.loads(js).get("logs", "")
+            except Exception:
+                logs = ""
+            if logs and logs != last_logs:
+                # Event log là chuỗi nhiều dòng; chỉ thêm phần mới ở cuối.
+                add_term("[event-log] " + logs.replace("\\n", " | ")[-400:])
+                last_logs = logs
+        except Exception as e:
+            conn_state = "MAT KET NOI (%s)" % type(e).__name__
+        time.sleep(0.5)
+
+
+# ---------------- HTTP server (chung cho cả 2 chế độ) ----------------
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        pass  # keep console output quiet; comment out to debug HTTP traffic
+    def log_message(self, *a):
+        pass
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path == "/":
-            self._serve_page()
-        elif parsed.path == "/api":
-            body = poll_status().encode("utf-8")
-            self._respond(200, "application/json", body)
-        elif parsed.path == "/cmd":
-            c = parse_qs(parsed.query).get("c", [""])[0]
+        u = urlparse(self.path)
+        if u.path == "/":
+            self._page()
+        elif u.path == "/api":
+            self._respond(200, "application/json", get_status().encode("utf-8"))
+        elif u.path == "/cmd":
+            c = parse_qs(u.query).get("c", [""])[0]
             if c:
                 send_command(c)
             self._respond(200, "text/plain", b"OK")
+        elif u.path == "/term":
+            since = parse_qs(u.query).get("since", ["0"])[0]
+            try:
+                since = int(since)
+            except ValueError:
+                since = 0
+            self._respond(200, "application/json", term_payload(since).encode("utf-8"))
         else:
             self._respond(404, "text/plain", b"Not found")
 
-    def _serve_page(self):
+    def _page(self):
         try:
             with open(PAGE_PATH, "rb") as f:
-                body = f.read()
-            self._respond(200, "text/html; charset=utf-8", body)
+                self._respond(200, "text/html; charset=utf-8", f.read())
         except OSError as e:
             self._respond(500, "text/plain", str(e).encode("utf-8"))
 
-    def _respond(self, code, content_type, body: bytes):
+    def _respond(self, code, ctype, body):
         self.send_response(code)
-        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
 
+def get_status():
+    if mode == "wifi":
+        # last_status đã được poller cập nhật; trả bản mới nhất.
+        with state_lock:
+            return last_status
+    with state_lock:
+        return last_status
+
+
+def send_command(cmd):
+    if mode == "wifi":
+        try:
+            wifi_get("/cmd?c=" + quote(cmd))
+        except Exception as e:
+            add_term("[bridge] loi gui lenh WiFi: %s" % e)
+    else:
+        wire_send(cmd)
+
+
+def term_payload(since):
+    with state_lock:
+        total = term_base + len(term_lines)
+        start = max(since, term_base)
+        idx = start - term_base
+        lines = term_lines[idx:] if 0 <= idx <= len(term_lines) else term_lines[:]
+        return json.dumps({"mode": mode, "state": conn_state,
+                           "lines": lines, "next": total})
+
+
 def main():
-    global ser
+    global mode, ser, wifi_base, conn_state
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("port", help="Serial port, e.g. COM5 or /dev/ttyUSB0")
+    ap.add_argument("mode", nargs="?", choices=["wire", "wifi"], help="wire hoac wifi")
+    ap.add_argument("target", nargs="?", help="cong COM (wire) hoac IP (wifi)")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--http-port", type=int, default=8080)
     args = ap.parse_args()
 
-    ser = serial.Serial(args.port, args.baud, timeout=0)
-    time.sleep(0.3)  # let the port settle
-    ser.reset_input_buffer()
+    print("=== ECU Bridge GSU ===")
+    mode = args.mode
+    if not mode:
+        s = input("Kieu ket noi - go 'wire' (day/Serial) hoac 'wifi' [wire]: ").strip().lower()
+        mode = s if s in ("wire", "wifi") else "wire"
+
+    if mode == "wire":
+        try:
+            import serial  # noqa
+        except ImportError:
+            print("Che do day can: pip install pyserial", file=sys.stderr)
+            sys.exit(1)
+        import serial
+        target = args.target or input("Cong COM (vd COM5): ").strip()
+        ser = serial.Serial(target, args.baud, timeout=0)
+        time.sleep(0.3)
+        ser.reset_input_buffer()
+        conn_state = "DAY %s @ %d" % (target, args.baud)
+        threading.Thread(target=wire_reader, daemon=True).start()
+        threading.Thread(target=wire_poller, daemon=True).start()
+    else:
+        ip = args.target or input("IP cua ECU [192.168.4.1]: ").strip() or "192.168.4.1"
+        wifi_base = "http://" + ip
+        conn_state = "dang ket noi..."
+        threading.Thread(target=wifi_status_poller, daemon=True).start()
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.http_port), Handler)
-    print(f"Serial: {args.port} @ {args.baud}")
-    print(f"Dashboard: http://127.0.0.1:{args.http_port}/")
-    print("Ctrl+C to stop.")
+    print("Che do: %s" % mode.upper())
+    print("Dashboard: http://127.0.0.1:%d/" % args.http_port)
+    print("Ctrl+C de dung.")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         httpd.server_close()
-        ser.close()
+        if ser:
+            ser.close()
 
 
 if __name__ == "__main__":
