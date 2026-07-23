@@ -2063,8 +2063,8 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <div class="row small">PWM us <input id="manPus" value="1015">
 <button class="btn go" onclick="cmd('pumpmanual '+v('manPus'))">Giữ chạy</button>
 <button class="btn danger" onclick="cmd('pumpmanual off')">Dừng</button>
-<button class="btn" onclick="bump('manPus',-10,'pumpmanual')">-10</button>
-<button class="btn" onclick="bump('manPus',10,'pumpmanual')">+10</button></div>
+<button class="btn" onclick="bump('manPus',-1,'pumpmanual')">-1</button>
+<button class="btn" onclick="bump('manPus',1,'pumpmanual')">+1</button></div>
 
 <h3>Glow plug — <span id="manIgnSt">-</span></h3>
 <div class="row small">
