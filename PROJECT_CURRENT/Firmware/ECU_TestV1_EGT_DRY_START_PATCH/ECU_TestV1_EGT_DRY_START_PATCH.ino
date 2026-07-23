@@ -2989,7 +2989,7 @@ void handleCommand(String cmd) {
     String arg = cmd.substring(String("startmanual ").length()); arg.trim();
     if (arg == "off") { startUs = ESC_SAFE_US; manualStartOffAtMs = 0; applyOutputs(); Serial.println("STARTER MANUAL OFF."); return; }
     int us = arg.toInt();
-    if (us < 1000 || us > 1300) { Serial.println("ERROR: startmanual us 1000..1300 (or 'startmanual off')"); return; }
+    if (us < ESC_MIN_US || us > ESC_MAX_US) { Serial.print("ERROR: startmanual us "); Serial.print(ESC_MIN_US); Serial.print(".."); Serial.print(ESC_MAX_US); Serial.println(" (or 'startmanual off')"); return; }
     startUs = us; manualStartOffAtMs = 0; applyOutputs();
     Serial.print("STARTER MANUAL HOLD at "); Serial.print(us); Serial.println("us (no auto-off - 'startmanual off' to stop)");
     return;
@@ -3000,7 +3000,7 @@ void handleCommand(String cmd) {
     String arg = cmd.substring(String("pumpmanual ").length()); arg.trim();
     if (arg == "off") { pumpUs = ESC_SAFE_US; fuelTargetUs = ESC_SAFE_US; fuelValvesAuto(false); manualPumpOffAtMs = 0; applyOutputs(); Serial.println("PUMP MANUAL OFF."); return; }
     int us = arg.toInt();
-    if (us < 1000 || us > 1225) { Serial.println("ERROR: pumpmanual us 1000..1225 (or 'pumpmanual off')"); return; }
+    if (us < ESC_MIN_US || us > ESC_MAX_US) { Serial.print("ERROR: pumpmanual us "); Serial.print(ESC_MIN_US); Serial.print(".."); Serial.print(ESC_MAX_US); Serial.println(" (or 'pumpmanual off')"); return; }
     if (fuelCommandBlockedByHotEgt()) {
       Serial.print("PUMPMANUAL BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1);
       Serial.print("C > cooldown target "); Serial.print(cfg.cooldownTargetC); Serial.println("C).");
