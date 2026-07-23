@@ -44,6 +44,12 @@ conn_state = "-"
 ser = None                 # serial.Serial ở chế độ dây
 wifi_base = ""             # http://<ip> ở chế độ wifi
 
+last_rx_ms = 0             # thời điểm (time.time()) nhận được dòng Serial hợp lệ gần nhất, 0 = chưa nhận gì (chế độ dây)
+wire_info = ""              # vd "COM5 @ 115200", hiển thị kèm trong conn_state
+wire_target = ""           # tên cổng COM đã lưu, cho nút Kết nối lại
+wire_baud = 115200         # baud đã lưu, cho nút Kết nối lại
+WIRE_STALE_AFTER_S = 2.0    # quá lâu không nhận được dòng nào -> báo mất kết nối
+
 
 def add_term(line):
     global term_base
@@ -64,11 +70,16 @@ def is_status_json(line):
 def wire_reader():
     """Đọc liên tục từng dòng Serial: dòng JSON trạng thái -> last_status;
     còn lại -> terminal buffer."""
-    global last_status
+    global last_status, last_rx_ms
     buf = bytearray()
     while True:
+        s = ser
+        if s is None:
+            buf = bytearray()
+            time.sleep(0.2)
+            continue
         try:
-            chunk = ser.read(ser.in_waiting or 1)
+            chunk = s.read(s.in_waiting or 1)
         except Exception as e:
             add_term("[bridge] loi doc serial: %s" % e)
             time.sleep(0.5)
@@ -82,6 +93,8 @@ def wire_reader():
             line = raw.decode("utf-8", errors="replace").rstrip("\r")
             if not line:
                 continue
+            with state_lock:
+                last_rx_ms = time.time()
             if is_status_json(line):
                 with state_lock:
                     last_status = line
@@ -89,21 +102,84 @@ def wire_reader():
                 add_term(line)
 
 
+def wire_watchdog():
+    """Biến "mở cổng COM thành công lúc khởi động" thành trạng thái kết nối
+    SỐNG: trước đây conn_state đứng yên ở thông báo lúc khởi động mãi mãi, kể
+    cả khi ECU ngừng phản hồi hẳn (rút dây, crash, brownout). Suy ra tình
+    trạng thật từ việc có nhận được dòng Serial nào gần đây hay không."""
+    global conn_state
+    while True:
+        with state_lock:
+            rx = last_rx_ms
+        if not rx:
+            conn_state = "Dang cho phan hoi... (%s)" % wire_info
+        else:
+            age = time.time() - rx
+            if age < WIRE_STALE_AFTER_S:
+                conn_state = "OK (%s)" % wire_info
+            else:
+                conn_state = "MAT KET NOI - khong phan hoi %ds (%s)" % (int(age), wire_info)
+        time.sleep(0.3)
+
+
 def wire_poller():
     """Định kỳ xin trạng thái JSON."""
     while True:
-        try:
-            ser.write(b"apijson\n")
-        except Exception:
-            pass
+        s = ser
+        if s is not None:
+            try:
+                s.write(b"apijson\n")
+            except Exception:
+                pass
         time.sleep(STATUS_POLL_S)
 
 
 def wire_send(cmd):
+    if ser is None:
+        add_term("[bridge] chua co ket noi - bam 'Ket noi lai'")
+        return
     try:
         ser.write(cmd.encode("utf-8") + b"\n")
     except Exception as e:
         add_term("[bridge] loi gui lenh: %s" % e)
+
+
+def reconnect_wire():
+    """Đóng và mở lại cổng COM đã lưu, để phục hồi sau khi rút/cắm lại dây
+    hoặc ECU brownout mà không phải khởi động lại bridge."""
+    global ser, last_rx_ms, conn_state
+    try:
+        import serial
+    except ImportError:
+        add_term("[bridge] thieu pyserial")
+        return
+    old = ser
+    ser = None
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+    try:
+        ser = serial.Serial(wire_target, wire_baud, timeout=0)
+        time.sleep(0.3)
+        ser.reset_input_buffer()
+        with state_lock:
+            last_rx_ms = 0
+        add_term("[bridge] da mo lai cong %s" % wire_info)
+    except Exception as e:
+        conn_state = "LOI MO LAI CONG: %s (%s)" % (e, wire_info)
+        add_term("[bridge] ket noi lai that bai: %s" % e)
+
+
+def reconnect():
+    """Kết nối lại cho cả 2 chế độ."""
+    global conn_state
+    if mode == "wire":
+        reconnect_wire()
+    else:
+        conn_state = "dang ket noi lai..."
+        add_term("[bridge] thu ket noi lai WiFi %s" % wifi_base)
 
 
 # ---------------- Chế độ WiFi (HTTP proxy) ----------------
@@ -161,6 +237,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 since = 0
             self._respond(200, "application/json", term_payload(since).encode("utf-8"))
+        elif u.path == "/reconnect":
+            reconnect()
+            self._respond(200, "text/plain", b"OK")
         else:
             self._respond(404, "text/plain", b"Not found")
 
@@ -209,7 +288,7 @@ def term_payload(since):
 
 
 def main():
-    global mode, ser, wifi_base, conn_state
+    global mode, ser, wifi_base, conn_state, wire_info, wire_target, wire_baud
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("mode", nargs="?", choices=["wire", "wifi"], help="wire hoac wifi")
     ap.add_argument("target", nargs="?", help="cong COM (wire) hoac IP (wifi)")
@@ -234,9 +313,13 @@ def main():
         ser = serial.Serial(target, args.baud, timeout=0)
         time.sleep(0.3)
         ser.reset_input_buffer()
-        conn_state = "DAY %s @ %d" % (target, args.baud)
+        wire_target = target
+        wire_baud = args.baud
+        wire_info = "%s @ %d" % (target, args.baud)
+        conn_state = "Dang cho phan hoi... (%s)" % wire_info
         threading.Thread(target=wire_reader, daemon=True).start()
         threading.Thread(target=wire_poller, daemon=True).start()
+        threading.Thread(target=wire_watchdog, daemon=True).start()
     else:
         ip = args.target or input("IP cua ECU [192.168.4.1]: ").strip() or "192.168.4.1"
         wifi_base = "http://" + ip
