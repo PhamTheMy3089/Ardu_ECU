@@ -2055,24 +2055,28 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <h3>Starter</h3>
 <div class="row small">PWM us <input id="manSus" value="1200">
 <button class="btn go" onclick="cmd('startmanual '+v('manSus'))">Giữ chạy</button>
-<button class="btn danger" onclick="cmd('startmanual off')">Dừng</button></div>
+<button class="btn danger" onclick="cmd('startmanual off')">Dừng</button>
+<button class="btn" onclick="bump('manSus',-10,'startmanual')">-10</button>
+<button class="btn" onclick="bump('manSus',10,'startmanual')">+10</button></div>
 
 <h3>Pump <span class="small">(xả ra bình/ca, KHÔNG gắn engine)</span></h3>
-<div class="row small">PWM us <input id="manPus" value="1160">
+<div class="row small">PWM us <input id="manPus" value="1015">
 <button class="btn go" onclick="cmd('pumpmanual '+v('manPus'))">Giữ chạy</button>
-<button class="btn danger" onclick="cmd('pumpmanual off')">Dừng</button></div>
+<button class="btn danger" onclick="cmd('pumpmanual off')">Dừng</button>
+<button class="btn" onclick="bump('manPus',-10,'pumpmanual')">-10</button>
+<button class="btn" onclick="bump('manPus',10,'pumpmanual')">+10</button></div>
 
-<h3>Glow plug</h3>
+<h3>Glow plug — <span id="manIgnSt">-</span></h3>
 <div class="row small">
 <button class="btn go" onclick="cmd('ign on')">ON</button>
 <button class="btn danger" onclick="cmd('ign off')">OFF</button></div>
 
-<h3>Valve 1 (Start solenoid)</h3>
+<h3>Valve 1 (Start solenoid) — <span id="manV1St">-</span></h3>
 <div class="row small">
 <button class="btn go" onclick="cmd('valve1 on')">ON</button>
 <button class="btn danger" onclick="cmd('valve1 off')">OFF</button></div>
 
-<h3>Valve 2 (Main oil)</h3>
+<h3>Valve 2 (Main oil) — <span id="manV2St">-</span></h3>
 <div class="row small">
 <button class="btn go" onclick="cmd('valve2 on')">ON</button>
 <button class="btn danger" onclick="cmd('valve2 off')">OFF</button></div>
@@ -2185,6 +2189,7 @@ SD logging: <b id="swSdlog">-</b>
 </div><script>
 function v(id){return document.getElementById(id).value}
 function cmd(c){fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(load,200))}
+function bump(id,delta,prefix){var e=document.getElementById(id);var val=(parseInt(e.value)||1000)+delta;if(val<1000)val=1000;if(val>2000)val=2000;e.value=val;cmd(prefix+' '+val);}
 function pill(r){let cls=r=='PASS'?'pass':(r=='FAIL'?'fail':(r=='RUNNING'?'run':''));return '<span class="pill '+cls+'">'+r+'</span>'}
 function setInp(id,val){var e=document.getElementById(id);if(e&&val!==undefined&&document.activeElement!==e)e.value=val;}
 function txt(id,val){var e=document.getElementById(id);if(e&&val!==undefined)e.textContent=val;}
@@ -2212,6 +2217,7 @@ function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).t
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
  let cardsMan=[['RPM',d.rpm],['EGT',d.egt],['Starter',d.start],['Pump',d.pump],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2]];
  document.getElementById('cardsMan').innerHTML=cardsMan.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
+ txt('manIgnSt',d.ign);txt('manV1St',d.v1);txt('manV2St',d.v2);
  document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
  setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('rpmtol',d.cfgRpmTol);setInp('maxegt',d.cfgMaxEgt);setInp('maxgrad',d.cfgMaxGrad);
  setInp('rpmfilter',d.cfgRpmFilter);
