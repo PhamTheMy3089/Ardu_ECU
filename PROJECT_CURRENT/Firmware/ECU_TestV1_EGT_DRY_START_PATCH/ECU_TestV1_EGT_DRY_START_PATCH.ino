@@ -342,6 +342,15 @@ bool stage2Armed = false;
 bool abortAcknowledged = false;  // must be set via clearabort before re-arm from ABORTED
 bool runStartedByButton = false; // true if the current run was started by the physical button (comm watchdog does not apply)
 uint32_t stage2ArmUntilMs = 0, manualIgnOffAtMs = 0, manualStartOffAtMs = 0;
+uint32_t manualGlowRiseSinceMs = 0; // manual-page safety: same "real light-off" condition as ST_LIGHTOFF phase 0 (EGT>=ignitionThresholdC AND rising >= lightOffMinRiseCps), held since this time, while glow held on manually
+// Manual page "AUTO START": mirrors ST_INTRO_FUEL/ST_LIGHTOFF exactly (valve1+pump+glow,
+// then confirm real light-off, open valve2, close valve1, prove flame, glow off) but
+// stays in WAITING/ABORTED - no starter/RPM involved, just the fuel/valve/glow sequencing.
+bool     manAutoActive = false;
+uint8_t  manAutoPhase = 0;        // mirrors lightoffPhase: 0=wait real light-off, 1=valve2 open/settle, 2=flame prove
+uint32_t manAutoPhaseMs = 0;      // current sub-phase start time
+uint32_t manAutoRiseSinceMs = 0;  // phase-0 rising-condition hold timer (mirrors lightoffRiseSinceMs)
+uint32_t manAutoStartedMs = 0;    // overall sequence start time, for the no-ignition timeout
 uint32_t lastOperatorLinkMs = 0;  // last Serial/Web command or Web UI /api poll; feeds the comm watchdog
 String lastAbortReason = "NONE";
 String serialCmdBuf = "";  // non-blocking serial command accumulator
@@ -631,15 +640,17 @@ void applyOutputs() {
 }
 
 void fuelValvesAuto(bool on) {
+  // VALVE1 (Start solenoid valve): only fed by this function during the
+  // ignition/accel-to-idle sequence, force-closed the instant normal running
+  // (IDLING/OPERATING) is reached so the main circuit alone carries fuel from
+  // then on. In WAITING/ABORTED (bench/manual tests) it is left untouched
+  // here - it may already be open via a separate manual "valve1 on" command.
+  if (ecuMode == MODE_STARTING) valve1Cmd = on;
+  else if (ecuMode == MODE_IDLING || ecuMode == MODE_OPERATING) valve1Cmd = false;
   // VALVE2 (Main oil valve): open whenever fuel is commanded, matching the
-  // EnJet manual's "Oil Pump Test" behavior (linked to the main oil circuit
-  // regardless of engine mode).
-  valve2Cmd = on;
-  // VALVE1 (Start solenoid valve): only feeds the start oil circuit during
-  // the ignition/accel-to-idle sequence. Closes automatically the instant
-  // ecuMode leaves MODE_STARTING (e.g. the moment IDLING is entered), so the
-  // main circuit alone carries fuel for the rest of IDLING/OPERATING.
-  valve1Cmd = on && (ecuMode == MODE_STARTING);
+  // EnJet manual's "Oil Pump Test" behavior - but only if valve1 isn't
+  // already providing a fuel path (one open valve is enough; don't open both).
+  valve2Cmd = on && !valve1Cmd;
 }
 void forceSafeOutputs() { fuelTargetRpm = 0; fuelTargetUs = ESC_SAFE_US; pumpUs = ESC_SAFE_US; startUs = ESC_SAFE_US; ignCmd = valve1Cmd = valve2Cmd = false; applyOutputs(); }
 void enterMode(EcuMode m) {
@@ -726,6 +737,7 @@ void stage2Off() {
   }
   stage2Armed = false;
   manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0;
+  manAutoActive = false;
   activeTest = TEST_NONE; enterWaitingSafe(); addLog("SAFE OFF"); Serial.println("STAGE2 OFF: outputs safe.");
 }
 
@@ -1897,6 +1909,7 @@ String webStatusJson() {
   s += "\"ign\":\"" + String(ignCmd ? "ON" : "OFF") + "\",";
   s += "\"v1\":\"" + String(valve1Cmd ? "ON" : "OFF") + "\",";
   s += "\"v2\":\"" + String(valve2Cmd ? "ON" : "OFF") + "\",";
+  s += "\"manAuto\":\"" + String(manAutoStatusText()) + "\",";
   s += "\"thr\":\"" + String(throttlePct) + "%\",";
   s += "\"arm\":\"" + String(isStage2Armed() ? "ARMED" : "LOCKED") + "\",";
   s += "\"auto\":\"" + String(cfg.autoStartEnabled ? "ON" : "OFF") + "\",";
@@ -2052,6 +2065,12 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <h2>Điều khiển tay (Manual) <span class="small">— giữ nguyên tới khi bạn tắt, không tự động</span></h2>
 <div class="btns"><button class="btn danger" onclick="cmd('off')">🛑 SAFE OFF — TẮT HẾT NGAY</button></div>
 
+<h3>AUTO START — <span id="manAutoSt">-</span></h3>
+<div class="row small">
+<button class="btn go" onclick="cmd('manauto on')">▶ AUTO START</button>
+<button class="btn danger" onclick="cmd('manauto off')">■ Hủy</button>
+<span class="small">Yêu cầu RPM ≥ ignArmRpm (Settings) trước. Tự mở Valve1 + bơm mức min (introus) + bật glow, chờ bắt lửa thật (EGT≥ignitionThresholdC &amp; đang tăng ≥lightoffrise, giữ lightoffconfirmms) → mở Valve2 → chờ postignitionheatms → đóng Valve1 → chờ flameprovems xác nhận lửa còn cháy → tắt glow.</span></div>
+
 <h3>Starter — <span id="manStartSt">-</span></h3>
 <div class="row small">PWM us <input id="manSus" value="1200">
 <button class="btn go" onclick="cmd('startmanual '+v('manSus'))">Giữ chạy</button>
@@ -2063,13 +2082,14 @@ summary{cursor:pointer;padding:8px 0;color:#cfe0ff}h2{font-size:17px;margin:14px
 <div class="row small">PWM us <input id="manPus" value="1015">
 <button class="btn go" onclick="cmd('pumpmanual '+v('manPus'))">Giữ chạy</button>
 <button class="btn danger" onclick="cmd('pumpmanual off')">Dừng</button>
-<button class="btn" onclick="bump('manPus',-10,'pumpmanual')">-10</button>
-<button class="btn" onclick="bump('manPus',10,'pumpmanual')">+10</button></div>
+<button class="btn" onclick="bump('manPus',-1,'pumpmanual')">-1</button>
+<button class="btn" onclick="bump('manPus',1,'pumpmanual')">+1</button></div>
 
 <h3>Glow plug — <span id="manIgnSt">-</span></h3>
 <div class="row small">
 <button class="btn go" onclick="cmd('ign on')">ON</button>
-<button class="btn danger" onclick="cmd('ign off')">OFF</button></div>
+<button class="btn danger" onclick="cmd('ign off')">OFF</button>
+<span class="small">Tự tắt khi có bắt lửa thật (như LIGHTOFF): EGT&gt;=ignitionThresholdC &amp; dEGT&gt;=lightoffrise, giữ lightoffconfirmms (chỉnh ở Settings)</span></div>
 
 <h3>Valve 1 (Start solenoid) — <span id="manV1St">-</span></h3>
 <div class="row small">
@@ -2217,7 +2237,7 @@ function load(){fetch('/api?act='+(document.hidden?'0':'1')).then(r=>r.json()).t
  document.getElementById('cards').innerHTML=cards.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
  let cardsMan=[['RPM',d.rpm],['EGT',d.egt],['Starter',d.start],['Pump',d.pump],['IGN',d.ign],['Valve 1',d.v1],['Valve 2',d.v2]];
  document.getElementById('cardsMan').innerHTML=cardsMan.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="val">'+x[1]+'</div></div>').join('');
- txt('manStartSt',d.start);txt('manPumpSt',d.pump);txt('manIgnSt',d.ign);txt('manV1St',d.v1);txt('manV2St',d.v2);
+ txt('manStartSt',d.start);txt('manPumpSt',d.pump);txt('manIgnSt',d.ign);txt('manV1St',d.v1);txt('manV2St',d.v2);txt('manAutoSt',d.manAuto);
  document.getElementById('ck').innerHTML=d.checklist.map(x=>'<tr><td>'+x.name+'</td><td>'+pill(x.result)+'</td><td>'+x.note+'</td></tr>').join('');
  setInp('idlerpm',d.cfgIdleRpm);setInp('maxrpm',d.cfgMaxRpm);setInp('rpmtol',d.cfgRpmTol);setInp('maxegt',d.cfgMaxEgt);setInp('maxgrad',d.cfgMaxGrad);
  setInp('rpmfilter',d.cfgRpmFilter);
@@ -2446,6 +2466,78 @@ bool flameLost() {
   if (flameRefMs == 0 || now - flameRefMs >= 2000) { flameRefEgtC = egt.c; flameRefMs = now; }
   if (egt.c < flameRefEgtC - (float)cfg.flameOutDropC) return true;
   return false;
+}
+
+void manAutoFail(const char* reason) {
+  // Cuts glow/fuel/valves only - deliberately does NOT touch startUs, same as the real
+  // startFailed(): the starter must keep running (per spec, stage-1 rule RPM>3000) to
+  // blow unburned fuel out, not shut off with everything else. purgeOutUntilMs lets the
+  // shared applyStarterProtection() hold/restore RPM through the blow-out window if needed.
+  ignCmd = false; pumpUs = ESC_SAFE_US; fuelTargetUs = ESC_SAFE_US; fuelValvesAuto(false);
+  purgeOutUntilMs = millis() + cfg.purgeOutMs;
+  manAutoActive = false; applyOutputs();
+  Serial.print("MANUAL AUTO START FAILED: "); Serial.print(reason); Serial.println(" - starter left running (blow-out), turn off manually when done.");
+}
+
+// Manual page "AUTO START" sequence - mirrors ST_LIGHTOFF's phase 0/1/2 logic exactly
+// (see updateStarting()'s ST_LIGHTOFF case), reusing the same tunables, but without any
+// starter/RPM/ACCEL_TO_IDLE involvement: valve1+pump+glow are already on (set by the
+// "manauto on" command) by the time this runs each loop.
+void updateManAuto() {
+  if (!manAutoActive) return;
+  // checkFailures() (OVER_TEMP/OVERSPEED/EGT_FAULT) returns immediately while
+  // ecuMode is WAITING/ABORTED - exactly the mode this sequence runs in - so it
+  // provides no protection here. Guard OVER_TEMP explicitly, same condition/
+  // look-ahead as checkFailures(), since real fuel/glow are active in phases 1-2.
+  if (egt.ok && (egt.c >= (float)cfg.maxEgtC ||
+      (egt.gradientCps > 0.0f && (egt.c + EGT_ABORT_LOOKAHEAD_S * egt.gradientCps) >= (float)cfg.maxEgtC))) {
+    manAutoFail("OVER_TEMP"); return;
+  }
+  uint32_t now = millis();
+  if (manAutoPhase == 0) {
+    valve1Cmd = true; valve2Cmd = false;
+    if (now - manAutoPhaseMs >= cfg.fuelDelayMs) {
+      bool rising = egt.ok && egt.c >= (float)cfg.ignitionThresholdC &&
+                    egt.gradientCps >= (float)cfg.lightOffMinRiseCps;
+      if (rising) {
+        if (manAutoRiseSinceMs == 0) manAutoRiseSinceMs = now;
+      } else {
+        manAutoRiseSinceMs = 0; // condition broke, restart the hold timer
+      }
+      if (manAutoRiseSinceMs != 0 && now - manAutoRiseSinceMs >= cfg.lightOffConfirmMs) {
+        valve2Cmd = true; // confirmed light-off -> open Main Valve
+        flameRefEgtC = egt.c; flameRefMs = now;
+        manAutoPhase = 1; manAutoPhaseMs = now;
+        Serial.print("MANUAL AUTO START: light-off confirmed (EGT="); Serial.print(egt.c, 0);
+        Serial.print("C, dEGT="); Serial.print(egt.gradientCps, 0); Serial.println("C/s) -> open MAIN valve");
+      } else if (now - manAutoStartedMs >= cfg.noIgnitionTimeoutMs) {
+        manAutoFail("NO_IGNITION"); return;
+      }
+    }
+  } else if (manAutoPhase == 1) {
+    valve1Cmd = true; valve2Cmd = true;
+    if (flameLost()) { manAutoFail("FLAME_LOST"); return; }
+    if (now - manAutoPhaseMs >= cfg.postIgnitionHeatMs) {
+      valve1Cmd = false; // close Start Valve
+      manAutoPhase = 2; manAutoPhaseMs = now;
+      Serial.println("MANUAL AUTO START: close START valve, prove flame");
+    }
+  } else {
+    valve1Cmd = false; valve2Cmd = true;
+    if (flameLost()) { manAutoFail("FLAME_LOST"); return; }
+    if (now - manAutoPhaseMs >= cfg.flameProveMs) {
+      ignCmd = false; manAutoActive = false;
+      Serial.println("MANUAL AUTO START OK: glow OFF, pump/valve2 stay under manual control.");
+    }
+  }
+  applyOutputs();
+}
+
+String manAutoStatusText() {
+  if (!manAutoActive) return "OFF";
+  if (manAutoPhase == 0) return "Chờ bắt lửa thật (EGT/dEGT)";
+  if (manAutoPhase == 1) return "Đã bắt lửa - Valve2 mở, chờ ổn định";
+  return "Đóng Valve1 - đang xác nhận lửa còn cháy";
 }
 
 // Failed light-off: cut fuel/glow/valves, keep the starter blowing unburned fuel out
@@ -2773,9 +2865,11 @@ void printHelp() {
   Serial.println("startmanual us | startmanual off  -> hold starter PWM (no auto-off, manual page)");
   Serial.println("pumpmanual us | pumpmanual off    -> hold pump PWM + open valve1 (no auto-off, manual page)");
   Serial.println("ign on | ign off                  -> hold glow (no auto-off, manual page)");
+  Serial.println("manauto on | manauto off -> manual page AUTO START: requires RPM>=ignArmRpm, then mirrors ST_INTRO_FUEL/LIGHTOFF (valve1+pump+glow -> confirm real light-off -> valve2 -> close valve1 -> prove flame -> glow off)");
   Serial.println("valve1 on/off (Start solenoid, bench-only) | valve2 on/off (Main oil valve, bench-only)");
   Serial.println("startidle             -> guarded auto-idle start sequence");
   Serial.println("set egtstart dry|strict | set drystartms <ms>");
+  Serial.println("(manual page glow auto-off reuses lightoffrise/lightoffconfirmms - same real light-off rule as LIGHTOFF)");
   Serial.println("set ppr 1|2 | set intro <us> | set idleus <us> | set maxus <us> | set pumptestus <us>");
   Serial.println("set purgeus <us> | set spinus <us> | set assistus <us> -> starter crank PWM (1000..1500)");
   Serial.println("set rampfromus/ramptous/rampstepms/escarmholdms/purgestablems/ignarmrpm/spinuptimeoutms -> purge ramp");
@@ -3029,6 +3123,39 @@ void handleCommand(String cmd) {
   }
   if (cmd == "ign off") { ignCmd = false; manualIgnOffAtMs = 0; applyOutputs(); Serial.println("GLOW OFF."); return; }
 
+  if (cmd == "manauto on") {
+    if (ecuMode != MODE_WAITING && ecuMode != MODE_ABORTED) { Serial.println("ERROR: manauto only while WAITING/ABORTED."); return; }
+    if (fuelCommandBlockedByHotEgt()) {
+      Serial.print("MANUAL AUTO START BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C).");
+      return;
+    }
+    // Manual page has no starter/PURGE stage of its own - require the engine already
+    // spinning above ignArmRpm (same RPM the real PURGE stage requires) before letting
+    // fuel/glow in, same reason: don't introduce fuel into a stalled/barely-turning engine.
+    if (!rpmMeasurementUsable() || rpmData.rpm < (float)cfg.ignArmRpm) {
+      Serial.print("MANUAL AUTO START BLOCKED: RPM "); Serial.print(rpmMeasurementUsable() ? rpmData.rpm : 0.0f, 0);
+      Serial.print(" < ignArmRpm "); Serial.print(cfg.ignArmRpm); Serial.println(" - spin the engine up first (starter manual).");
+      return;
+    }
+    valve1Cmd = true; valve2Cmd = false;
+    pumpUs = cfg.introFuelUs; fuelTargetUs = cfg.introFuelUs;
+    ignCmd = true;
+    manualIgnOffAtMs = manualStartOffAtMs = manualPumpOffAtMs = 0;
+    manualGlowRiseSinceMs = 0; // manAuto owns the glow-off decision now, not the standalone safety net
+    manAutoPhase = 0; manAutoPhaseMs = millis(); manAutoRiseSinceMs = 0; manAutoStartedMs = millis();
+    flameRefMs = 0;
+    manAutoActive = true;
+    applyOutputs();
+    Serial.println("MANUAL AUTO START: Valve1 open, pump at introFuelUs, glow ON - waiting for real light-off...");
+    return;
+  }
+  if (cmd == "manauto off") {
+    manAutoActive = false; ignCmd = false; pumpUs = ESC_SAFE_US; fuelTargetUs = ESC_SAFE_US; fuelValvesAuto(false);
+    applyOutputs();
+    Serial.println("MANUAL AUTO START cancelled.");
+    return;
+  }
+
   if (cmd == "valve1 on") { if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE1 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve1Cmd = true; applyOutputs(); Serial.println("VALVE1 ON (no auto-off - turn off manually)"); return; }
   if (cmd == "valve1 off") { valve1Cmd = false; applyOutputs(); Serial.println("VALVE1 OFF"); return; }
   if (cmd == "valve2 on") { if (fuelCommandBlockedByHotEgt()) { Serial.print("VALVE2 BLOCKED: engine still hot (EGT="); Serial.print(egt.c, 1); Serial.println("C)."); return; } valve2Cmd = true; applyOutputs(); Serial.println("VALVE2 ON (no auto-off - turn off manually)"); return; }
@@ -3186,6 +3313,27 @@ void loop() {
   updateActiveTest();
   isStage2Armed();
   updateRpm(); updateEgt();
+  // Manual page safety: glow held ON by hand (bench test) - apply the exact same
+  // "real light-off" confirmation used by ST_LIGHTOFF phase 0 (EGT>=ignitionThresholdC
+  // AND rising >= lightOffMinRiseCps, held continuously for lightOffConfirmMs), so a
+  // real flame is what turns the glow off here too, not just glow radiant heat.
+  if (ignCmd && !manAutoActive && (ecuMode == MODE_WAITING || ecuMode == MODE_ABORTED)) {
+    bool rising = egt.ok && egt.c >= (float)cfg.ignitionThresholdC &&
+                  egt.gradientCps >= (float)cfg.lightOffMinRiseCps;
+    if (rising) {
+      if (manualGlowRiseSinceMs == 0) manualGlowRiseSinceMs = millis();
+      else if (millis() - manualGlowRiseSinceMs >= cfg.lightOffConfirmMs) {
+        ignCmd = false; manualIgnOffAtMs = 0; manualGlowRiseSinceMs = 0; applyOutputs();
+        Serial.print("GLOW AUTO OFF: real light-off detected (EGT="); Serial.print(egt.c, 0);
+        Serial.print("C, dEGT="); Serial.print(egt.gradientCps, 0); Serial.println("C/s).");
+      }
+    } else {
+      manualGlowRiseSinceMs = 0;
+    }
+  } else {
+    manualGlowRiseSinceMs = 0;
+  }
+  updateManAuto();
   switch (ecuMode) {
     case MODE_WAITING: break;
     case MODE_STARTING: updateStarting(); break;
