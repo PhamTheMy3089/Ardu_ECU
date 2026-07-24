@@ -62,7 +62,38 @@ Pin 3S (-) ──────┴──→ ESC IN (-)
 - Để dây dẫn càng ngắn càng tốt (< 5cm)
 - Không được hàn capacitor ngược cực → nổ
 
-### 1.3 Mạch Gộp Dây CH340 (Để Flash ESC) — **CẦN CHUẨN BỊ**
+### 1.3 Mạch Lọc Nhiễu Nguồn DC (Power Noise Filter) — **KHUYẾN CÁO**
+
+**Mục đích**: Lọc sạch và làm phẳng điện áp từ pin LiPo trước khi cấp cho UBEC, giảm ripple/noise do motor đề gây ra. Điều này bảo vệ vi điều khiển khỏi nhiễu PWM của motor.
+
+**Thông số mạch**:
+- **Loại**: Mạch lọc LC (LC Power Filter)
+- **Điện áp hoạt động**: 0–50V DC
+- **Dòng tối đa**: 4A
+- **Công dụng**: Lọc sạch, làm phẳng điện áp, giảm ù rè, sôi nền
+
+**Sơ đồ nối**:
+```
+Pin 3S LiPo (0-50V)
+    ↓
+[Mạch Lọc LC 0-50V 4A]  ← Làm sạch nguồn, giảm ripple
+    ↓
+UBEC 5V (ổn áp thành 5V)
+    ↓
+ESP32 VCC (nhận 5V sạch)
+```
+
+**Lợi ích**:
+- Giảm nhiễu PWM từ motor đề ảnh hưởng đến ESP32
+- Làm phẳng điện áp, tránh sụt áp đột ngột
+- Bảo vệ UBEC và vi điều khiển khỏi spike điện áp
+
+**Lưu ý**:
+- Đặt mạch này **càng gần pin LiPo càng tốt** (dây vào ngắn)
+- Màu sắc tụ điện có thể thay đổi theo đợt hàng → công năng không đổi
+- Đảm bảo dòng chạy qua mạch không vượt 4A (không vấn đề cho ESP32 + UBEC, chỉ cần lưu ý khi có thêm thiết bị khác)
+
+### 1.4 Mạch Gộp Dây CH340 (Để Flash ESC) — **CẦN CHUẨN BỊ**
 
 Bạn đã có mạch CH340 với jumper 3.3V từ ảnh trước → **dùng tốt**.
 
@@ -325,6 +356,7 @@ void writePWM(int microSeconds) {
 ### ✅ Giai Đoạn 1: Chuẩn Bị Phần Cứng
 - [ ] Chuẩn bị 2 pin LiPo riêng (1 cho ESC motor, 1 cho BEC vi điều khiển)
 - [ ] Hàn capacitor 1000µF/25V song song vào 2 cực vào ESC
+- [ ] **Nối Mạch Lọc Nhiễu DC 0-50V 4A**: Pin → Mạch lọc → UBEC 5V → ESP32
 - [ ] Nối dây GND chung giữa pin motor + pin BEC + vi điều khiển (điểm tham chiếu duy nhất)
 - [ ] Chuẩn bị mạch CH340 với jumper 3.3V
 
